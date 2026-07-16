@@ -34,7 +34,7 @@ FAN_CURVE = [
     (85, 0x78),   # 85°C+: max effective PWM (5200 RPM)
 ]
 
-POLL_INTERVAL = 1.0         # Seconds between temperature checks
+POLL_INTERVAL = 0.15        # Seconds between temperature/PWM writes (EC overrides in ~0.2s)
 DLL_PATH = r"C:\Program Files\LecooControlCenter\inpoutx64.dll"
 PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fengfan.pid")
 
@@ -156,14 +156,19 @@ def read_pid():
             return None
 
 def is_running():
-    pid = read_pid()
-    if pid is None:
-        return False
+    """Check if daemon is running by searching process list."""
+    import subprocess
     try:
-        os.kill(pid, 0)  # Signal 0 = existence check (Windows supported in Py3)
-        return True
-    except (OSError, PermissionError):
-        return False
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq python.exe", "/V"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if "fengfan" in line.lower():
+                return True
+    except Exception:
+        pass
+    return False
 
 def remove_pid():
     if os.path.exists(PID_FILE):
