@@ -1,5 +1,5 @@
 """
-FengFanControl — setup / uninstall script
+LecooFan — setup / uninstall script
 
 Installs or removes the Windows Task Scheduler auto-start entry.
 
@@ -15,10 +15,10 @@ import subprocess
 import platform
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(PROJECT_DIR, "fengfan.py")
+SCRIPT = os.path.join(PROJECT_DIR, "lecoofan.py")
 PYTHON_EXE = sys.executable
-TASK_NAME = "FengFanControl"
-TASK_DESC = "FengFanControl — N175L IT5570 EC quiet fan curve daemon"
+TASK_NAME = "LecooFan"
+TASK_DESC = "LecooFan — N175L IT5570 EC quiet fan curve daemon"
 
 
 def check_admin():

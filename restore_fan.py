@@ -1,5 +1,5 @@
 """
-FengFanControl — 一键恢复出厂设置
+LecooFan — 一键恢复出厂设置
 
 将 EC 风扇控制恢复到出厂状态（EC 自动控制）。
 在任何异常情况下运行此脚本，风扇会立刻回到笔记本原厂设置。
@@ -66,7 +66,7 @@ def read_ram(dll, port, offset):
 
 
 def kill_fengfan():
-    """Kill any running fengfan.py process."""
+    """Kill any running lecoofan.py process."""
     killed = False
     try:
         result = subprocess.run(
@@ -80,20 +80,20 @@ def kill_fengfan():
                 if pid and pid.isdigit():
                     os.kill(int(pid), signal.SIGTERM)
                     killed = True
-                    print(f"  [+] Killed fengfan.py (PID {pid})")
+                    print(f"  [+] Killed lecoofan.py (PID {pid})")
     except Exception as e:
         print(f"  [-] Error killing fengfan: {e}")
     return killed
 
 
 def kill_by_pid_file():
-    pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fengfan.pid")
+    pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lecoofan.pid")
     if os.path.exists(pid_file):
         try:
             with open(pid_file, "r", encoding="utf-8") as f:
                 pid = int(f.read().strip())
             os.kill(pid, signal.SIGTERM)
-            print(f"  [+] Killed fengfan.py via PID file (PID {pid})")
+            print(f"  [+] Killed lecoofan.py via PID file (PID {pid})")
             os.unlink(pid_file)
             return True
         except (ValueError, OSError, FileNotFoundError):
@@ -104,14 +104,14 @@ def kill_by_pid_file():
 def main():
     BANNER = """
 ╔══════════════════════════════════════════════════════════╗
-║         FengFanControl — 一键恢复出厂设置               ║
+║         LecooFan — 一键恢复出厂设置               ║
 ║         One-Click Restore to Factory Fan Control        ║
 ╚══════════════════════════════════════════════════════════╝
     """
     print(BANNER)
 
     # Step 1: Kill running daemon
-    print("[1/4] Stopping FengFanControl daemon...")
+    print("[1/4] Stopping LecooFan daemon...")
     killed = kill_by_pid_file()
     if not killed:
         killed = kill_fengfan()

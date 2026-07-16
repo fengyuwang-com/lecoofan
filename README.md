@@ -1,7 +1,7 @@
-# FengFanControl
+# LecooFan
 
-**Lenovo N175L (Lecoo) 笔记本 — 降噪降温完整方案**  
-**Complete quiet-cooling stack for a loud laptop**
+**Lenovo N175L (Lecoo / 来酷) / ITE IT5570 EC 完整降噪方案**  
+**Complete quiet-cooling stack for N175L laptop**
 
 > 让这台笔记本彻底安静下来。从 CPU 降压到风扇曲线，全部管住。  
 > Silence this machine. From CPU undervolt to PWM override — the whole stack.
@@ -29,7 +29,7 @@
 **任何时候觉得风扇异常 / If you suspect ANY issue:**
 
 ```bash
-cd C:\FengProj\FengFanControl
+cd C:\FengProj\LecooFan
 python restore_fan.py
 ```
 
@@ -51,9 +51,9 @@ python restore_fan.py
 │                  应用层 / User Space              │
 │                                                   │
 │  ┌─────────────────────┐  ┌──────────────────┐  │
-│  │   ThrottleStop      │  │  FengFanControl  │  │
+│  │   ThrottleStop      │  │  LecooFan  │  │
 │  │   (CPU undervolt    │  │  (PWM daemon)    │  │
-│  │    + Speed Shift)   │  │  fengfan.py      │  │
+│  │    + Speed Shift)   │  │  lecoofan.py      │  │
 │  │   ThrottleStop.exe  │  │  150ms poll      │  │
 │  └─────────┬───────────┘  └────────┬─────────┘  │
 │            │                       │            │
@@ -88,7 +88,7 @@ python restore_fan.py
 |----|------|------|------|
 | **1. 降压** | ThrottleStop | CPU core/cache 降压 -50~-100mV | 温度降 5-15°C |
 | **2. 节能策略** | ThrottleStop | Speed Shift EPP=80-128, 启用 C-States | 空闲时降频降功耗 |
-| **3. 风扇控制** | FengFanControl | 150ms 周期覆写 EC 寄存器 0x1809 | 按温度曲线控转速 |
+| **3. 风扇控制** | LecooFan | 150ms 周期覆写 EC 寄存器 0x1809 | 按温度曲线控转速 |
 
 **缺一层，效果就出不来。** 只控风扇不降压 = 高温 + 还是吵（因为 CPU 本身太热）。只降压不控风扇 = 温度降了但 EC 可能还是让风扇转太快。
 
@@ -100,7 +100,7 @@ python restore_fan.py
 
 | 项目 | 值 | 备注 |
 |------|------|------|
-| **笔记本型号** | Lenovo N175L (Lecoo / 来酷) | 14 寸轻薄本 |
+| **笔记本型号** | **Lenovo N175L** (Lecoo / 来酷) | 14 寸轻薄本，IT5570 EC |
 | **CPU** | Intel Core Ultra 5 125H | Meteor Lake, 14核/18线程, 最高 4.5GHz |
 | **EC 芯片** | ITE IT5570 | Super I/O, 8051 内核 |
 | **EC 端口** | 0x4E / 0x4F | LPC 总线上的 Super I/O 配置空间 |
@@ -117,7 +117,7 @@ python restore_fan.py
 | **路径** | `C:\Users\a8881\AppData\Local\Programs\Python\Python312\python.exe` |
 | **版本** | 3.12.10 |
 | **安装来源** | [python.org](https://www.python.org/downloads/) |
-| **用途** | 运行 fengfan.py 守护进程 |
+| **用途** | 运行 lecoofan.py 守护进程 |
 | **额外包** | 无（只用标准库 ctypes） |
 | **验证** | `python --version` |
 
@@ -154,11 +154,11 @@ python restore_fan.py
 | 字段 | 值 |
 |------|------|
 | **命令行** | `schtasks.exe` |
-| **任务名称** | `ThrottleStop` 和 `FengFanControl` |
+| **任务名称** | `ThrottleStop` 和 `LecooFan` |
 | **触发条件** | 用户登录时 (AtLogOn) |
 | **权限** | 管理员权限 (Highest Available) |
 | **验证** | `schtasks /Query /TN ThrottleStop` → 显示状态 Ready |
-| | `schtasks /Query /TN FengFanControl` → 显示状态 Ready |
+| | `schtasks /Query /TN LecooFan` → 显示状态 Ready |
 
 ---
 
@@ -261,19 +261,19 @@ CPU 空闲深度睡眠状态。启用后 CPU 在空闲时进入更深睡眠，�
 ### 快速启动 / Quick Start
 
 ```bash
-cd C:\FengProj\FengFanControl
+cd C:\FengProj\LecooFan
 
 # 查看当前状态
-python fengfan.py --status
+python lecoofan.py --status
 
 # 10 秒测试
-python fengfan.py --test
+python lecoofan.py --test
 
 # 前台运行（日志实时显示）
-python fengfan.py
+python lecoofan.py
 
 # 后台静音运行
-python fengfan.py --quiet
+python lecoofan.py --quiet
 ```
 
 ### 双击操作 / Double-click
@@ -311,34 +311,34 @@ CPU 温度      目标 PWM     实际 ~RPM     噪音感知
 ```bash
 # 查看任务
 schtasks /Query /TN ThrottleStop
-schtasks /Query /TN FengFanControl
+schtasks /Query /TN LecooFan
 
 # 手动运行
 schtasks /Run /TN ThrottleStop
-schtasks /Run /TN FengFanControl
+schtasks /Run /TN LecooFan
 
 # 禁用（不删除，只是暂停）
 schtasks /Change /TN ThrottleStop /DISABLE
-schtasks /Change /TN FengFanControl /DISABLE
+schtasks /Change /TN LecooFan /DISABLE
 
 # 启用
 schtasks /Change /TN ThrottleStop /ENABLE
-schtasks /Change /TN FengFanControl /ENABLE
+schtasks /Change /TN LecooFan /ENABLE
 
 # 完全删除
 schtasks /Delete /TN ThrottleStop /F
-schtasks /Delete /TN FengFanControl /F
+schtasks /Delete /TN LecooFan /F
 
 # 重新安装
-powershell -ExecutionPolicy Bypass -File "C:\FengProj\FengFanControl\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\FengProj\LecooFan\setup.ps1"
 ```
 
 ### 任务详情 / Task Details
 
-| 属性 | ThrottleStop | FengFanControl |
+| 属性 | ThrottleStop | LecooFan |
 |------|-------------|----------------|
 | **可执行文件** | `ThrottleStop.exe` | `python.exe` |
-| **参数** | (无，直接启动) | `-u "C:\FengProj\FengFanControl\fengfan.py" --quiet` |
+| **参数** | (无，直接启动) | `-u "C:\FengProj\LecooFan\lecoofan.py" --quiet` |
 | **触发** | AtLogOn (登录时) | AtLogOn (登录时) |
 | **延迟** | 无 | 15 秒 |
 | **权限** | Highest (管理员) | Highest (管理员) |
@@ -364,8 +364,8 @@ python restore_fan.py
 ### restore_fan.py 执行流程
 
 ```
-[1/4] 停止 FengFanControl 守护进程
-  → kill fengfan.py 进程
+[1/4] 停止 LecooFan 守护进程
+  → kill lecoofan.py 进程
   → 删除 PID 文件
 
 [2/4] 连接 EC
@@ -395,7 +395,7 @@ python restore_fan.py
 
 ## 🎯 风扇曲线调优 / Tuning the Fan Curve
 
-编辑 `fengfan.py` 顶部 `FAN_CURVE` 列表：
+编辑 `lecoofan.py` 顶部 `FAN_CURVE` 列表：
 
 ```python
 FAN_CURVE = [
@@ -442,7 +442,7 @@ FAN_CURVE = [
 
 1. **最高温度点≥90°C 时 PWM 必须 ≥0x78** — 确保极限情况有足够散热
 2. **最低温度点的 PWM 用 0x18** — EC 强制下限，写更低也没用
-3. **修改后立即测试** — 运行 `python fengfan.py --test` 观察 10 秒
+3. **修改后立即测试** — 运行 `python lecoofan.py --test` 观察 10 秒
 4. **准备恢复手段** — 保持终端开着，随时 Ctrl+C + `python restore_fan.py`
 
 ---
@@ -480,7 +480,7 @@ Error: "inpoutx64 driver not loaded"
 ### 风扇噪音没变化 / Fan Still Loud
 
 ```
-1. 运行 fengfan.py --status 查看温度
+1. 运行 lecoofan.py --status 查看温度
    → 如果温度 >80°C：风扇不可能安静，CPU 就是需要散热
    → 解决方向：ThrottleStop 降压 / 检查后台进程
 
@@ -495,13 +495,13 @@ Error: "inpoutx64 driver not loaded"
 
 ```bash
 # 检查任务状态
-schtasks /Query /TN FengFanControl /V
+schtasks /Query /TN LecooFan /V
 
 # 手动运行测试
-schtasks /Run /TN FengFanControl
+schtasks /Run /TN LecooFan
 
 # 查看上次运行结果
-schtasks /Query /TN FengFanControl /V | find "Last Result"
+schtasks /Query /TN LecooFan /V | find "Last Result"
 ```
 
 ### GBK 编码错误 / Encoding Errors
@@ -510,11 +510,11 @@ Python 在 Windows 上默认用 GBK 编码。如果脚本输出乱码或报 `Uni
 
 ```bash
 # 用 -u 参数运行（已内置在 bat 文件和 Task Scheduler 中）
-python -u fengfan.py
+python -u lecoofan.py
 
 # 或设置环境变量
 set PYTHONIOENCODING=utf-8
-python fengfan.py
+python lecoofan.py
 ```
 
 ---
@@ -522,9 +522,9 @@ python fengfan.py
 ## 📁 文件索引 / File Index
 
 ```
-C:\FengProj\FengFanControl\          # ★ 本项目的根目录
+C:\FengProj\LecooFan\          # ★ 本项目的根目录
 │
-├── fengfan.py                       # 风扇控制守护进程（核心）
+├── lecoofan.py                       # 风扇控制守护进程（核心）
 │   ├── class EC                     # EC 寄存器读写 (inpoutx64)
 │   ├── temp_to_pwm()                # 温度→PWM 插值
 │   ├── run_loop()                   # 主循环 (150ms 间隔)
@@ -539,12 +539,12 @@ C:\FengProj\FengFanControl\          # ★ 本项目的根目录
 │
 ├── setup.ps1                        # 安装脚本 (Task Scheduler)
 │   ├── 创建 ThrottleStop 任务       # 登录自启动
-│   └── 创建 FengFanControl 任务     # 登录自启动
+│   └── 创建 LecooFan 任务     # 登录自启动
 │
 ├── start_fan.bat                    # 双击启动（前台窗口）
 ├── stop_fan.bat                     # 双击恢复出厂（安全入口）
 ├── toggle_fan.bat                   # 双击切换（智能切换）
-├── fengfan.pid                      # PID 文件 (自动生成)
+├── lecoofan.pid                      # PID 文件 (自动生成)
 └── README.md                        # ← 本文档
 
 C:\FenglinApps\ThrottleStop_9.7\     # ThrottleStop 安装目录
@@ -596,7 +596,7 @@ EC:     ---W-------W-------W-------W---  (EC 每 ~200ms 写 0x1809)
 
 `lecoo-ec-daemon.exe` 写 `EC 0x044B`（HRAM+0x4B）来控制风扇，但 **N175L 的风扇寄存器是 0x1809 而不是 0x044B**。这是 Lecoo Control Center 的 bug（它只适配了 N155A 等旧型号）。
 
-| | Lecoo daemon | FengFanControl |
+| | Lecoo daemon | LecooFan |
 |---|---|---|
 | **写的地址** | 0x044B (HRAM+0x4B) | **0x1809** |
 | **是否有效** | ❌ 对 N175L 无效 | ✅ 正确 |
@@ -635,7 +635,7 @@ Speed Shift EPP = 80         →  空闲时主动降频到 0.8-1.5GHz
 CPU 空闲温度从 85°C → 65°C   →  风扇可以跑 1700 RPM
 CPU 满载温度从 95°C → 80°C   →  风扇跑 4000 RPM 就够
                               ↓
-fengfan.py 按曲线控 PWM      →  温度低 → 风扇低转速 → 安静
+lecoofan.py 按曲线控 PWM      →  温度低 → 风扇低转速 → 安静
 ```
 
 ---

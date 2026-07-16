@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Complete setup script for FengFanControl + ThrottleStop on N175L.
+    Complete setup script for LecooFan + ThrottleStop on N175L.
     Run this as Administrator (right-click → Run with PowerShell).
 #>
 
@@ -13,7 +13,7 @@ $ThrottleStopPath = "C:\FenglinApps\ThrottleStop_9.7\ThrottleStop.exe"
 $ThrottleStopArgs = "-t"  # minimize to tray
 
 $PythonExe = "C:\Users\a8881\AppData\Local\Programs\Python\Python312\python.exe"
-$FanScript = Join-Path $ScriptDir "fengfan.py"
+$FanScript = Join-Path $ScriptDir "lecoofan.py"
 $FanPythonArgs = "-u `"$FanScript`" --quiet"
 
 function Write-Step {
@@ -46,7 +46,7 @@ if (-not (Test-Path $PythonExe)) {
     Write-OK
 }
 if (-not (Test-Path $FanScript)) {
-    Write-Warn "fengfan.py not found at: $FanScript"
+    Write-Warn "lecoofan.py not found at: $FanScript"
 } else {
     Write-OK
 }
@@ -74,8 +74,8 @@ $tsTask = New-ScheduledTask `
 Register-ScheduledTask -TaskName "ThrottleStop" -InputObject $tsTask -Force
 Write-OK
 
-# ─── Task 2: FengFanControl ─────────────────────────────────────────────────
-Write-Step "Setting up FengFanControl auto-start (Task Scheduler)..."
+# ─── Task 2: LecooFan ─────────────────────────────────────────────────
+Write-Step "Setting up LecooFan auto-start (Task Scheduler)..."
 
 $fanAction = New-ScheduledTaskAction -Execute $PythonExe -Argument $FanPythonArgs
 $fanTrigger = New-ScheduledTaskTrigger -AtLogOn
@@ -92,16 +92,16 @@ $fanTask = New-ScheduledTask `
     -Trigger $fanTrigger `
     -Settings $fanSettings `
     -Principal $fanPrincipal `
-    -Description "FengFanControl — N175L IT5570 EC quiet fan curve"
+    -Description "LecooFan — N175L IT5570 EC quiet fan curve (lecoofan)"
 
-Register-ScheduledTask -TaskName "FengFanControl" -InputObject $fanTask -Force
+Register-ScheduledTask -TaskName "LecooFan" -InputObject $fanTask -Force
 Write-OK
 
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Step "Summary"
 Write-Host "  Task Scheduler entries created:"
 Write-Host "    - ThrottleStop    (at logon, admin, minimized to tray)"
-Write-Host "    - FengFanControl  (at logon, admin, quiet background)"
+Write-Host "    - LecooFan  (at logon, admin, quiet background)"
 Write-Host ""
 Write-Host "  To start manually NOW:" -ForegroundColor Yellow
 Write-Host "    Start-Process -WindowStyle Hidden $ThrottleStopPath"
@@ -109,10 +109,10 @@ Write-Host "    Start-Process -WindowStyle Hidden -FilePath $PythonExe -Argument
 Write-Host ""
 Write-Host "  To disable:"
 Write-Host "    Disable-ScheduledTask -TaskName 'ThrottleStop'"
-Write-Host "    Disable-ScheduledTask -TaskName 'FengFanControl'"
+Write-Host "    Disable-ScheduledTask -TaskName 'LecooFan'"
 Write-Host ""
 Write-Host "  To remove:"
 Write-Host "    Unregister-ScheduledTask -TaskName 'ThrottleStop' -Confirm:`$false"
-Write-Host "    Unregister-ScheduledTask -TaskName 'FengFanControl' -Confirm:`$false"
+Write-Host "    Unregister-ScheduledTask -TaskName 'LecooFan' -Confirm:`$false"
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
