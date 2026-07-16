@@ -1,14 +1,14 @@
 """
-FengFanControl — N175L (IT5570 EC) fan control daemon
+LecooFan — N175L (IT5570 EC) fan control daemon (lecoofan)
 
 Reads CPU temp from EC HRAM+0x70, applies a temperature→PWM curve,
 continuously writes to EC register 0x1809 to override the EC's auto-control.
 
 Usage:
-    python fengfan.py                # Foreground with log
-    python fengfan.py --quiet        # Background (silent)
-    python fengfan.py --status       # Show current EC state and exit
-    python fengfan.py --test         # Quick 10s test run
+    python lecoofan.py                # Foreground with log
+    python lecoofan.py --quiet        # Background (silent)
+    python lecoofan.py --status       # Show current EC state and exit
+    python lecoofan.py --test         # Quick 10s test run
 """
 
 import ctypes
@@ -36,7 +36,7 @@ FAN_CURVE = [
 
 POLL_INTERVAL = 0.15        # Seconds between temperature/PWM writes (EC overrides in ~0.2s)
 DLL_PATH = r"C:\Program Files\LecooControlCenter\inpoutx64.dll"
-PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fengfan.pid")
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lecoofan.pid")
 
 
 # ─── EC Access Layer ─────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ def show_status(ec=None):
 
 def run_loop(ec, quiet=False):
     """Run the fan control loop until interrupted."""
-    print(f"FengFanControl v{VERSION}")
+    print(f"LecooFan v{VERSION}")
     print(f"Curve: {FAN_CURVE}")
     print(f"Poll interval: {POLL_INTERVAL}s")
     print("Press Ctrl+C to stop.\n")
@@ -248,7 +248,7 @@ def main():
         return 0
 
     if "--test" in sys.argv:
-        print(f"[TEST] FengFanControl v{VERSION} — 10-second test")
+        print(f"[TEST] LecooFan v{VERSION} — 10-second test")
         try:
             ec = EC()
         except Exception as e:
