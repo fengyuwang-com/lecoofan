@@ -652,7 +652,7 @@ lecoofan.py 按曲线控 PWM      →  温度低 → 风扇低转速 → 安静
 
 ## License
 
-GNU General Public License v3.0 — [LICENSE](LICENSE)
+GNU AGPL-3.0v3 — [LICENSE](LICENSE)
 
 ---
 
