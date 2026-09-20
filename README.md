@@ -29,7 +29,7 @@
 **任何时候觉得风扇异常 / If you suspect ANY issue:**
 
 ```bash
-cd C:\FengProj\LecooFan
+cd C:\Projects\LecooFan
 python restore_fan.py
 ```
 
@@ -261,7 +261,7 @@ CPU 空闲深度睡眠状态。启用后 CPU 在空闲时进入更深睡眠，�
 ### 快速启动 / Quick Start
 
 ```bash
-cd C:\FengProj\LecooFan
+cd C:\Projects\LecooFan
 
 # 查看当前状态
 python lecoofan.py --status
@@ -330,7 +330,7 @@ schtasks /Delete /TN ThrottleStop /F
 schtasks /Delete /TN LecooFan /F
 
 # 重新安装
-powershell -ExecutionPolicy Bypass -File "C:\FengProj\LecooFan\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\Projects\LecooFan\setup.ps1"
 ```
 
 ### 任务详情 / Task Details
@@ -338,7 +338,7 @@ powershell -ExecutionPolicy Bypass -File "C:\FengProj\LecooFan\setup.ps1"
 | 属性 | ThrottleStop | LecooFan |
 |------|-------------|----------------|
 | **可执行文件** | `ThrottleStop.exe` | `python.exe` |
-| **参数** | (无，直接启动) | `-u "C:\FengProj\LecooFan\lecoofan.py" --quiet` |
+| **参数** | (无，直接启动) | `-u "C:\Projects\LecooFan\lecoofan.py" --quiet` |
 | **触发** | AtLogOn (登录时) | AtLogOn (登录时) |
 | **延迟** | 无 | 15 秒 |
 | **权限** | Highest (管理员) | Highest (管理员) |
@@ -522,7 +522,7 @@ python lecoofan.py
 ## 📁 文件索引 / File Index
 
 ```
-C:\FengProj\LecooFan\          # ★ 本项目的根目录
+C:\Projects\LecooFan\          # ★ 本项目的根目录
 │
 ├── lecoofan.py                       # 风扇控制守护进程（核心）
 │   ├── class EC                     # EC 寄存器读写 (inpoutx64)
