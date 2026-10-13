@@ -14,13 +14,15 @@
 2. [系统全景 / System Overview](#-系统全景--system-overview)
 3. [所有依赖 / All Dependencies](#-所有依赖--all-dependencies)
 4. [ThrottleStop 配置 / ThrottleStop Setup](#-throttlestop-配置--throttlestop-setup)
-5. [风扇控制 / Fan Control](#-风扇控制--fan-control)
-6. [自启动 / Auto-Start](#-自启动--auto-start)
-7. [一键恢复出厂 / One-Click Restore](#-一键恢复出厂--one-click-restore)
-8. [风扇曲线调优 / Tuning the Curve](#-风扇曲线调优--tuning-the-fan-curve)
-9. [故障排除 / Troubleshooting](#-故障排除--troubleshooting)
-10. [文件索引 / File Index](#-文件索引--file-index)
-11. [技术原理 / How It Works](#-技术原理--how-it-works)
+5. [CPU 静音限速 / Quiet CPU Limit](#-cpu-静音限速--quiet-cpu-limit)
+6. [图形控制台 / GUI Console](#-图形控制台--gui-console)
+7. [风扇控制 / Fan Control](#-风扇控制--fan-control)
+8. [自启动 / Auto-Start](#-自启动--auto-start)
+9. [一键恢复出厂 / One-Click Restore](#-一键恢复出厂--one-click-restore)
+10. [风扇曲线调优 / Tuning the Curve](#-风扇曲线调优--tuning-the-fan-curve)
+11. [故障排除 / Troubleshooting](#-故障排除--troubleshooting)
+12. [文件索引 / File Index](#-文件索引--file-index)
+13. [技术原理 / How It Works](#-技术原理--how-it-works)
 
 ---
 
@@ -29,7 +31,7 @@
 **任何时候觉得风扇异常 / If you suspect ANY issue:**
 
 ```bash
-cd C:\Projects\LecooFan
+cd C:\Projects\lecoofan
 python restore_fan.py
 ```
 
@@ -89,8 +91,11 @@ python restore_fan.py
 | **1. 降压** | ThrottleStop | CPU core/cache 降压 -50~-100mV | 温度降 5-15°C |
 | **2. 节能策略** | ThrottleStop | Speed Shift EPP=80-128, 启用 C-States | 空闲时降频降功耗 |
 | **3. 风扇控制** | LecooFan | 150ms 周期覆写 EC 寄存器 0x1809 | 按温度曲线控转速 |
+| **4. CPU 静音限速** | quiet_cpu.bat / GUI | 关睿频 + EPP 省电 + 被动散热 | 满载 84→71°C，风扇 3400→3200 RPM |
 
 **缺一层，效果就出不来。** 只控风扇不降压 = 高温 + 还是吵（因为 CPU 本身太热）。只降压不控风扇 = 温度降了但 EC 可能还是让风扇转太快。
+
+**第 4 层是后来补上的**：前两层都在"降温"，风扇层只是"控制转速"，真正让笔记本安静下来的是把 CPU 发热量本身压下去——见下一节和各档实测数据。
 
 ---
 
@@ -256,12 +261,137 @@ CPU 空闲深度睡眠状态。启用后 CPU 在空闲时进入更深睡眠，�
 
 ---
 
+## 🎚 CPU 静音限速 / Quiet CPU Limit
+
+风扇曲线只能压转速，压不住发热源。这一层从 CPU 侧限速：**关睿频 + 省电偏好 + 被动散热**，让 CPU 少发热，风扇自然就慢。
+想要图形界面就双击 `LecooFanGUI.exe`（见下一节），命令行则用 `quiet_cpu.bat` / `restore_cpu.bat`。
+
+### 本机实测：哪些键真的生效
+
+| 设置 | 位置 | 本机结果 |
+|------|------|----------|
+| 最大处理器状态 `PROCTHROTTLEMAX` | 经典限频 | ❌ **无效**：设 50% 仍跑到 4.2GHz |
+| 处理器最大频率 `PROCFREQMAX` | 绝对 MHz 上限 | ❌ **无效**：设 2400MHz 仍跑到 4273MHz |
+| 处理器性能提升模式 `PERFBOOSTMODE` | 睿频开关 | ✅ **生效**（唯一真正压得住频率的键） |
+| 能效偏好 `PERFEPP`（含 EPP1/EPP2） | HWP 提示 | ✅ 生效（往省电端迁移） |
+| 系统散热方式 `SYSCOOLPOL` | 主动/被动 | ✅ 生效（被动 = 先降频再转风扇） |
+| 处理器性能自主模式 `PERFAUTONOMOUS` | HWP | ⚠️ 生效，但实测效果相反，见下表 |
+
+> 混合架构（P 核 + E 核）笔记本上 `PROCTHROTTLEMAX` 被固件/系统忽略是已知现象；
+> 所以别只看设置项有没有写进去，要看**实测温度和跑分**。
+
+### 四种模式与实测数据
+
+| 模式 | 关键设置 | 满载温度 | 风扇转速 | 单核跑分 | 全核跑分 |
+|------|----------|----------|----------|----------|----------|
+| **高性能** | boost=2, EPP 0/0, 散热=主动 | 87 °C | ~4400 RPM | 0.31 s | 1.86 s |
+| **平衡（原厂）** | boost=2, EPP 33/50, 散热=主动 | 84 °C | ~3400 RPM | 0.35 s | 1.87 s |
+| **安静（推荐）** | boost=0, EPP 60/70, 散热=被动 | **71 °C** | **~3200 RPM** | 0.66 s | 2.22 s |
+| **极静（实验）** | 安静 + 关 HWP 自主模式 | 79 °C | ~4600 RPM | 0.68 s | 2.27 s |
+
+测量条件：14 进程满载 24 秒，取稳定期 EC 温度/转速；跑分 = 4×10⁶ 次整数乘加（单核取 3 次最好成绩，全核为墙钟时间）。
+轻载时数字会好看很多（安静档几个线程 ≈ 54-60 °C / 2200-2800 RPM）。
+
+**三点值得记：**
+1. **"安静"档是甜点**：满载 84→71 °C，风扇从 ~3400 降到 ~3200 RPM 且不再往上飙，代价是单核慢约 1.9 倍。
+2. **多核代价很小**：全核跑分只慢约 15%（1.87→2.22 s）。14 核本来就撞功耗墙，限速主要伤单线程响应速度。
+3. **"极静"反而更吵**：关掉 HWP 自主模式后调度变粗、同样负载更热（79 °C），风扇升到 ~4600 RPM。与直觉相反，所以它只作为调试档保留。
+
+**和 32GB 大内存的用法很搭**：内存密集型的长时间负载（虚拟机、容器、编译、一堆后台服务）耗的是内存带宽而不是瞬时算力，
+切到"安静"档后整机稳定在 ~71 °C / 基本听不见的风扇，只有编译那类单线程环节会慢一些。
+
+### 命令行用法
+
+```bash
+quiet_cpu.bat          # 安静档（推荐）
+quiet_cpu.bat deep     # 实验极静档（会更热更吵）
+restore_cpu.bat        # 还原出厂（睿频回来）
+```
+
+两个脚本会自己请求管理员权限，改的是**当前电源方案**，重启后依然有效。
+
+---
+
+## 🖥 图形控制台 / GUI Console
+
+双击 `LecooFanGUI.exe`（会弹一次 UAC）。不需要安装任何东西——它是用 Windows 自带的 .NET Framework 编译器编译的 WinForms 程序。
+
+**界面四块：**
+
+1. **CPU 模式** — 四个按钮一键切换（高性能 / 平衡(原厂) / 安静 / 极静(实验)），当前档位高亮并显示该档实测数据。
+2. **实时监控** — EC 温度、风扇 RPM、PWM、最高核心频率、平均频率、负载；下面一行显示当前电源方案里真实的 `睿频 / EPP / 散热 / 自主模式 / 最大状态 / 最大频率`，用来确认点击真的生效了。
+3. **微调** — EPP 滑块 (0-100) + 睿频开关 + 散热方式，自己试参数用。
+4. **风扇控制** — EC 自动 / **静音上限（锁转速）** / 静音曲线（同 lecoofan.py 的曲线，250 ms 覆写 0x1809）/ 手动 PWM 滑块。**退出、关闭或温度 ≥92 °C 都会自动把风扇交还 EC。**
+
+右下角「压力测试 10 秒」会拉起 14 个线程，统计这段时间的**最高核心频率 / 最高温度 / 最高转速 / 平均负载**，
+方便在两个档位之间直接对比（听感差别 + 数字差别）。
+
+窗口内的日志同时写入同目录的 `lecoofan_gui.log`。
+
+**命令行（免开窗口，可脚本化）：**
+
+```bash
+LecooFanGUI.exe --apply quiet     # 切换模式 (perf | bal | quiet | deep)
+LecooFanGUI.exe --report          # 采样一次：温度/转速/PWM/频率/当前设置
+LecooFanGUI.exe --fan-cap 1800 10 # 静音上限：10 秒内把转速锁在 1800 RPM
+LecooFanGUI.exe --fan-curve 10    # 接管风扇 10 秒（走静音曲线）后交还
+LecooFanGUI.exe --fan-off         # 立即交还风扇给 EC
+LecooFanGUI.exe --diag            # EC 与性能计数器诊断
+```
+
+### 把风扇锁在 1800 RPM（静音上限 / Silent Cap）
+
+风扇控制里选 **「静音上限」**，转速下拉选 1800 RPM，点一下就是日常最安静的状态；
+下面还默认勾着 **「同步 CPU 安静档」**，等于一键把发热源和风扇一起压下去。
+
+它不是猜一个 PWM 值，而是**按实测转速闭环**：每 250 ms 读一次 EC 转速，比目标吵就把 PWM 收一级，
+比目标安静就放一级（±120 RPM 死区，避免抖动/啸叫）。所以机器再热，转速也不会被 EC 自己拉上去。
+
+**实测（本机空载 54-56 °C）：**
+
+| 状态 | 写入 PWM | 实测转速 |
+|------|----------|----------|
+| 静音上限 1800 RPM | `0x18`（EC 地板） | **1731-1963 RPM** |
+| 退出后 EC 自动 | `0x02` | 1653 RPM |
+
+> 1800 RPM 已经是这条风扇的地板：EC 自身的下限约 **1700 RPM**，写比 `0x18` 更低的 PWM 会被 EC 抬回来，
+> 所以「锁 1800」实际就是「能多安静就多安静」——比原厂空载常见的三千多转安静一大截。
+> 实测值落在 1731-1963 之间：PWM 已经到底了，剩下的差别是风扇惯性回落快慢（要几秒），不是控不住。
+
+**两条安全边界（都是自动的，不用记）：**
+
+1. **72 °C 护栏**：超过护栏温度后按每度 6 级 PWM **平滑**放开转速，宁可吵也不烧；温度降回来自动收回。
+2. **≥92 °C**：立刻整个交还 EC 自动控制。
+
+验证方式：把护栏临时压到 40 °C 复跑，PWM 立刻放开到 `0x72`、转速 4911 RPM；护栏正常时全程 `laidopen=False`、PWM 稳定在 `0x18`。
+
+**注意**：锁转速是「本程序每 250 ms 覆写一次 0x1809」实现的，所以**关掉程序就回到 EC 自动**（原厂曲线）。
+想长期保持，就让 GUI 开着（或见下面的自启动章节）。
+另外**满载时锁不住 1800**——那不是限制失效，而是 1800 RPM 物理上散不掉那么多热，护栏会按温度把转速放上去。
+
+`--report` / `--diag` 的结果会同时打印到控制台并写入 `gui_cli_report.txt`。
+
+**自己重新编译：**
+
+```bash
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -codepage:65001 ^
+  -target:winexe -out:LecooFanGUI.exe -win32manifest:lecoofan_gui.manifest ^
+  -r:System.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll lecoofan_gui.cs
+```
+
+**注意**
+- 需要管理员权限（改电源方案 + 加载 inpout 驱动都要）。
+- 静音曲线不要和 `lecoofan.py` 守护进程同时接管 EC（GUI 启动时会检查 `lecoofan.pid` 并提醒）。
+- 频率读数是性能计数器的 `Actual Frequency`；混合架构上它偏保守，判断快慢请以跑分为准。
+
+---
+
 ## 🔧 风扇控制 / Fan Control
 
 ### 快速启动 / Quick Start
 
 ```bash
-cd C:\Projects\LecooFan
+cd C:\Projects\lecoofan
 
 # 查看当前状态
 python lecoofan.py --status
@@ -330,7 +460,7 @@ schtasks /Delete /TN ThrottleStop /F
 schtasks /Delete /TN LecooFan /F
 
 # 重新安装
-powershell -ExecutionPolicy Bypass -File "C:\Projects\LecooFan\setup.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\Projects\lecoofan\setup.ps1"
 ```
 
 ### 任务详情 / Task Details
@@ -338,7 +468,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Projects\LecooFan\setup.ps1"
 | 属性 | ThrottleStop | LecooFan |
 |------|-------------|----------------|
 | **可执行文件** | `ThrottleStop.exe` | `python.exe` |
-| **参数** | (无，直接启动) | `-u "C:\Projects\LecooFan\lecoofan.py" --quiet` |
+| **参数** | (无，直接启动) | `-u "C:\Projects\lecoofan\lecoofan.py" --quiet` |
 | **触发** | AtLogOn (登录时) | AtLogOn (登录时) |
 | **延迟** | 无 | 15 秒 |
 | **权限** | Highest (管理员) | Highest (管理员) |
@@ -522,7 +652,7 @@ python lecoofan.py
 ## 📁 文件索引 / File Index
 
 ```
-C:\Projects\LecooFan\          # ★ 本项目的根目录
+C:\Projects\lecoofan\          # ★ 本项目的根目录
 │
 ├── lecoofan.py                       # 风扇控制守护进程（核心）
 │   ├── class EC                     # EC 寄存器读写 (inpoutx64)
@@ -544,6 +674,15 @@ C:\Projects\LecooFan\          # ★ 本项目的根目录
 ├── start_fan.bat                    # 双击启动（前台窗口）
 ├── stop_fan.bat                     # 双击恢复出厂（安全入口）
 ├── toggle_fan.bat                   # 双击切换（智能切换）
+│
+├── quiet_cpu.bat                    # ★ CPU 静音限速（关睿频，等价 GUI 的"安静"档）
+├── restore_cpu.bat                  # ★ 还原出厂 CPU 设置（睿频回来）
+│
+├── LecooFanGUI.exe                  # ★ 图形控制台（双击运行，需管理员）
+├── lecoofan_gui.cs                  # GUI 源码（C# WinForms，无第三方依赖）
+├── lecoofan_gui.manifest            # requireAdministrator 清单
+├── lecoofan_gui.log                 # GUI 运行日志 (自动生成)
+├── gui_cli_report.txt               # --report/--diag 输出 (自动生成)
 ├── lecoofan.pid                      # PID 文件 (自动生成)
 └── README.md                        # ← 本文档
 
