@@ -1,1 +1,17 @@
 *.pid
+
+# GUI 运行日志（自动生成）
+lecoofan_gui.log
+
+# --report / --diag / --dumpui 输出（自动生成）
+gui_cli_report.txt
+
+# 稳定性长跑输出（自动生成）
+soak_*.csv
+soak_*.txt
+
+# 调试截图（自动生成）
+gui_shot.png
+
+# 编译产物；重建命令见 README「图形控制台」
+LecooFanGUI.exe
