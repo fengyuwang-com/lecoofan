@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Complete setup script for LecooFan + ThrottleStop on N175L.
@@ -74,38 +74,64 @@ $tsTask = New-ScheduledTask `
 Register-ScheduledTask -TaskName "ThrottleStop" -InputObject $tsTask -Force
 Write-OK
 
-# ─── Task 2: LecooFan ─────────────────────────────────────────────────
+# ─── Task 2: LecooFan（图形控制台，登录后直接进托盘，不弹窗口）─────────────────
 Write-Step "Setting up LecooFan auto-start (Task Scheduler)..."
 
-$fanAction = New-ScheduledTaskAction -Execute $PythonExe -Argument $FanPythonArgs
-$fanTrigger = New-ScheduledTaskTrigger -AtLogOn
-$fanSettings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit 0
-$fanPrincipal = New-ScheduledTaskPrincipal `
-    -GroupId "BUILTIN\Administrators" `
-    -RunLevel Highest
-$fanTask = New-ScheduledTask `
-    -Action $fanAction `
-    -Trigger $fanTrigger `
-    -Settings $fanSettings `
-    -Principal $fanPrincipal `
-    -Description "LecooFan — N175L IT5570 EC quiet fan curve (lecoofan)"
+$FanGuiExe = Join-Path $ScriptDir "LecooFanGUI.exe"
+if (-not (Test-Path $FanGuiExe)) {
+    Write-Warn "LecooFanGUI.exe not found at: $FanGuiExe"
+    Write-Warn "Build it first (see 'Rebuild' in README), then re-run this script."
+} else {
+    $fanAction = New-ScheduledTaskAction -Execute $FanGuiExe -Argument "--tray"
+    $fanTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $fanSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit 0 `
+        -MultipleInstances IgnoreNew
+    $fanPrincipal = New-ScheduledTaskPrincipal `
+        -UserId "$env:USERDOMAIN\$env:USERNAME" `
+        -LogonType Interactive `
+        -RunLevel Highest
+    $fanTask = New-ScheduledTask `
+        -Action $fanAction `
+        -Trigger $fanTrigger `
+        -Settings $fanSettings `
+        -Principal $fanPrincipal `
+        -Description "LecooFan GUI: N175L EC fan control + CPU modes (tray autostart)"
 
-Register-ScheduledTask -TaskName "LecooFan" -InputObject $fanTask -Force
-Write-OK
+    Register-ScheduledTask -TaskName "LecooFan" -InputObject $fanTask -Force
+    Write-OK
+}
+
+# 启动项（注册表 Run 键）：任务管理器的"启动应用"列表只认 Run 键和启动文件夹，
+# 计划任务不显示在里面。这里指向无清单的启动桩 LecooFanTray.exe——它登录时去触发
+# 上面的计划任务，不提权、不弹 UAC，让启动项在任务管理器里可见且可一键禁用。
+$FanTrayStub = Join-Path $ScriptDir "LecooFanTray.exe"
+if (Test-Path $FanTrayStub) {
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+        -Name "LecooFan" -Value "`"$FanTrayStub`""
+    Write-OK
+} else {
+    Write-Warn "LecooFanTray.exe not found (build it - see README 'Rebuild'); startup entry skipped."
+}
+
+# 说明：旧的 python 守护进程任务（lecoofan.py --quiet）已被上面同名任务取代。
+# 它的功能（静音曲线/锁转速）现在由 GUI 托盘模式承担；两个同时跑会互相抢 EC。
 
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Step "Summary"
 Write-Host "  Task Scheduler entries created:"
 Write-Host "    - ThrottleStop    (at logon, admin, minimized to tray)"
-Write-Host "    - LecooFan  (at logon, admin, quiet background)"
+Write-Host "    - LecooFan  (at logon, admin, GUI in tray: fan control + CPU modes)"
+Write-Host ""
+Write-Host "  Startup entry (visible in Task Manager > Startup apps):"
+Write-Host "    - Run key HKCU\...\Run\LecooFan -> LecooFanTray.exe (triggers the task, no UAC)"
 Write-Host ""
 Write-Host "  To start manually NOW:" -ForegroundColor Yellow
 Write-Host "    Start-Process -WindowStyle Hidden $ThrottleStopPath"
-Write-Host "    Start-Process -WindowStyle Hidden -FilePath $PythonExe -ArgumentList '$FanPythonArgs'"
+Write-Host "    Start-Process -FilePath $FanGuiExe -ArgumentList '--tray'"
 Write-Host ""
 Write-Host "  To disable:"
 Write-Host "    Disable-ScheduledTask -TaskName 'ThrottleStop'"

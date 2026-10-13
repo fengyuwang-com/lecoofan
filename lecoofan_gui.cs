@@ -3,7 +3,7 @@
 // Build (uses the .NET Framework compiler that ships with Windows — no installs):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe ^
 //       /out:LecooFanGUI.exe /win32manifest:lecoofan_gui.manifest ^
-//       /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll lecoofan_gui.cs
+//       /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll lecoofan_gui.cs lecoofan_ui.cs
 //
 // What it does
 //   1. CPU modes  : writes the power scheme directly through powrprof (no powercfg windows).
@@ -97,16 +97,22 @@ namespace LecooFanGui
     // ─────────────────────────────────────────────────────────────────────────
     //  CPU mode table
     // ─────────────────────────────────────────────────────────────────────────
+    enum FanPreset { Auto, Silent }
+
     class CpuMode
     {
         public string Key, Label, Note;
         public uint Boost, EppAc, EppDc, CoolAc, CoolDc, Auton;
+        public FanPreset Fan;                       // 点这个模式时顺手配的风扇行为
+        public int RpmCap;                          // Fan == Silent 时的转速上限
 
         public CpuMode(string key, string label, uint boost, uint eppAc, uint eppDc,
-                       uint coolAc, uint coolDc, uint auton, string note)
+                       uint coolAc, uint coolDc, uint auton, string note,
+                       FanPreset fan, int rpmCap)
         {
             Key = key; Label = label; Boost = boost; EppAc = eppAc; EppDc = eppDc;
             CoolAc = coolAc; CoolDc = coolDc; Auton = auton; Note = note;
+            Fan = fan; RpmCap = rpmCap;
         }
 
         public void Apply()
@@ -251,7 +257,7 @@ namespace LecooFanGui
         public volatile int ManualPwm = 0x30;
 
         // 静音上限（Silent）：不猜 PWM，直接按实测转速闭环，锁在目标值附近
-        public volatile int SilentRpmCap = 1800;
+        public volatile int SilentRpmCap = 2000;
         public volatile int SilentGuardC = 72;      // 超过这个温度就自动放开转速
         public volatile bool SilentLaidOpen;        // 护栏是否正在放开
         int silentPwm = PWM_MIN;                    // 闭环状态：当前写入 0x1809 的值
@@ -491,13 +497,63 @@ namespace LecooFanGui
     {
         static readonly CpuMode[] Modes = new CpuMode[]
         {
-            new CpuMode("perf",  "高性能",   2,  0,  0, 1, 1, 1, "睿频开 + EPP 0 + 主动散热\n满载 87°C / ~4400 RPM"),
-            new CpuMode("bal",   "平衡(原厂)", 2, 33, 50, 1, 0, 1, "出厂原始设置\n满载 84°C / ~3400 RPM"),
-            new CpuMode("quiet", "安静",     0, 60, 70, 0, 0, 1, "关睿频 + EPP 60/70 + 被动\n满载 71°C / ~3200 RPM"),
-            new CpuMode("deep",  "极静(实验)", 0, 80, 90, 0, 0, 0, "关 HWP 自主模式\n实测更热更吵 79°C / ~4600"),
+            new CpuMode("perf",  "高性能",   2,  0,  0, 1, 1, 1, "睿频开 + EPP 0 + 主动散热 + 风扇 EC 自动\n满载 87°C / ~4400 RPM，最吵但满血", FanPreset.Auto, 0),
+            new CpuMode("bal",   "平衡(原厂)", 2, 33, 50, 1, 0, 1, "出厂原始设置 + 风扇 EC 自动\n满载 84°C / ~3400 RPM", FanPreset.Auto, 0),
+            new CpuMode("quiet", "安静",     0, 60, 70, 0, 0, 1, "关睿频 + EPP 60/70 + 被动 + 风扇锁 2000 RPM\n满载约 64-66°C / ~1950 RPM（护栏 72°C 兜底）", FanPreset.Silent, 2000),
+            new CpuMode("deep",  "极静(实验)", 0, 80, 90, 0, 0, 0, "关 HWP 自主模式 + 风扇锁 1600 RPM\n实验档：1600 低于 EC 地板 ~1700，实坐地板，仅调试用", FanPreset.Silent, 1600),
         };
 
         static readonly string LogFile = System.IO.Path.Combine(Application.StartupPath, "lecoofan_gui.log");
+        static readonly string CfgFile = System.IO.Path.Combine(Application.StartupPath, "lecoofan_gui.cfg");
+
+        // ── 高 DPI 适配 ──
+        // 清单里声明了 dpiAware（系统级感知）：Windows 不再位图拉伸，改用真实 DPI 跑窗体。
+        // 布局全是绝对坐标，于是按缩放比把坐标整体等比放大（ScaleTree）。
+        // 字号是“点”，高 DPI 屏上 Windows 自己会按比例放大 —— 所以出厂点字号一个字节都不动，
+        // 坐标和字天然同步放大；谁要是再把字号乘一次缩放比，字就会比布局大一截，全部挤成一团。
+        // --dumpui [scale] 的测试模式反过来用：按“目标缩放 / 本机缩放”放大字号，
+        // 好在任意 DPI 的机器上精确模拟目标缩放下的最终效果。
+        static float DpiScale = 1f;
+        static float dpiScaleForTest = 0f;      // >0：--dumpui 指定缩放（测试用，全局覆盖）
+
+        /// <summary>本机真实缩放比（96 DPI = 1）。</summary>
+        static float ComputeDpiScale()
+        {
+            try
+            {
+                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                    return Math.Max(1f, Math.Min(3f, g.DpiX / 96f));
+            }
+            catch { return 1f; }
+        }
+
+        static int S(int v) { return (int)Math.Round(v * DpiScale); }
+
+        /// <summary>主题字体已是成品（出厂点字号 / 或测试模式放大后的），不能再乘一次。</summary>
+        static bool IsThemeFont(Font f)
+        {
+            return f == Ui.FontBase || f == Ui.FontSmall || f == Ui.FontCardTitle
+                || f == Ui.FontBig || f == Ui.FontMono;
+        }
+
+        static void ScaleTree(Form form, float s, float fontScale)
+        {
+            foreach (Control c in form.Controls) ScaleOne(c, s, fontScale);
+            form.ClientSize = new Size(S(860), S(760));   // 与 BuildUi 里的 860x760 保持一致
+        }
+
+        static void ScaleOne(Control c, float s, float fontScale)
+        {
+            ScaleSubtree(c, s, fontScale);                // 子控件坐标是绝对的，先缩子再缩父
+            c.SetBounds(S(c.Left), S(c.Top), S(c.Width), S(c.Height));
+            if (fontScale != 1f && c.Font != null && !IsThemeFont(c.Font))
+                c.Font = new Font(c.Font.FontFamily, c.Font.Size * fontScale, c.Font.Style);
+        }
+
+        static void ScaleSubtree(Control parent, float s, float fontScale)
+        {
+            foreach (Control c in parent.Controls) ScaleOne(c, s, fontScale);
+        }
 
         Ec ec = new Ec();
         Sampler sampler;
@@ -511,30 +567,224 @@ namespace LecooFanGui
         Label valTemp, valRpm, valPwm, valMaxMhz, valAvgMhz, valLoad, valSys;
         TrackBar trkEpp, trkPwm;
         Label lblEppVal, lblPwmVal, lblRpmCap;
-        CheckBox chkTurbo, chkSilentQuiet;
+        CheckBox chkTurbo;
         ComboBox cmbCool, cmbSoakLen, cmbRpmCap;
         RadioButton radFanAuto, radFanCurve, radFanSilent, radFanManual;
-        bool quietAppliedBySilent;
         static readonly int[] RpmCaps = { 1600, 1800, 2000, 2200, 2500, 3000 };
         TextBox txtLog;
         Button btnStress, btnSoak, btnFactory;
         Soak soak = new Soak();
         System.Windows.Forms.Timer uiTimer;
+        NotifyIcon trayIcon;                       // 托盘模式（--tray / 开机自启动）用
+        bool trayMode, allowClose, balloonShown;
+        int lastTrayTemp = int.MinValue;
 
         public MainForm()
+            : this(false)
         {
+        }
+
+        /// <param name="cliMode">命令行自检/脚本模式：不读配置、不碰用户设置</param>
+        public MainForm(bool cliMode)
+        {
+            DpiScale = dpiScaleForTest > 0f ? dpiScaleForTest : ComputeDpiScale();
+            // 测试模式：字号按“目标缩放 / 本机缩放”放大，等价于真的在目标 DPI 的屏上跑
+            float fontScale = dpiScaleForTest > 0f ? DpiScale / ComputeDpiScale() : 1f;
+            Ui.SetScaleBaked(DpiScale, fontScale);
+            Ui.TouchFonts();                           // BuildUi 之前把主题字体建好
             BuildUi();
+            ScaleTree(this, DpiScale, fontScale);
+            Font = Ui.FontBase;
+
             sampler = new Sampler(ec);
             sampler.Start();
             DetectDaemon();
-            Log("LecooFan GUI 启动。EC: " + ec.Status);
+            Log("LecooFan GUI 启动。EC: " + ec.Status
+                + (DpiScale != 1f ? string.Format("（DPI 缩放 {0:0.##}×）", DpiScale) : ""));
             if (daemonWarning.Length > 0) Log(daemonWarning);
             RefreshSettingsLine();
             SyncModeButtons();
+            if (!cliMode) LoadSettings();          // 恢复上次的 CPU + 风扇配置（托盘启动同样恢复）
             uiTimer = new System.Windows.Forms.Timer();
             uiTimer.Interval = 500;
             uiTimer.Tick += delegate { RefreshUi(); };
             uiTimer.Start();
+        }
+
+        // ── 托盘 / 后台运行 ──
+
+        /// <summary>开机自启动/托盘模式：不弹窗口，只在通知区显示图标，配置照样恢复。</summary>
+        public void EnableTray()
+        {
+            trayMode = true;
+            BuildTrayIcon();
+            ShowInTaskbar = false;
+            WindowState = FormWindowState.Minimized;
+            Log("托盘模式：窗口不自动弹出，双击通知区图标可打开控制台。");
+            if (trayIcon != null)
+                trayIcon.ShowBalloonTip(5000, "LecooFan 已在后台运行",
+                    "控制台已收回托盘。双击图标打开，右键菜单可「交还风扇给 EC」或退出。", ToolTipIcon.Info);
+        }
+
+        void BuildTrayIcon()
+        {
+            if (trayIcon != null) return;
+            trayIcon = new NotifyIcon();
+            trayIcon.Icon = BuildFanIcon(-1);
+            trayIcon.Text = "LecooFan 控制台";
+            trayIcon.Visible = true;
+            trayIcon.DoubleClick += delegate { RestoreFromTray(); };
+            ContextMenu menu = new ContextMenu();
+            menu.MenuItems.Add("打开控制台", delegate { RestoreFromTray(); });
+            menu.MenuItems.Add("交还风扇给 EC", delegate { ReleaseFanToEc(); });
+            menu.MenuItems.Add("退出", delegate { allowClose = true; Close(); });
+            trayIcon.ContextMenu = menu;
+        }
+
+        void RestoreFromTray()
+        {
+            ShowInTaskbar = true;
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Show();
+            Activate();
+        }
+
+        void ReleaseFanToEc()
+        {
+            try
+            {
+                if (sampler != null) sampler.Mode = FanMode.Auto;
+                if (ec != null && ec.Available) ec.ReleaseFan();
+                SaveSettings();
+                Log("托盘: 风扇已交还 EC 自动控制。");
+            }
+            catch { }
+        }
+
+        /// <summary>托盘 logo：三叶风扇徽标，颜色随温度（凉=品牌蓝/绿，烫=红）。</summary>
+        static Icon BuildFanIcon(int temp)
+        {
+            double t = temp < 0 ? 0.0 : Math.Max(0, Math.Min(1, (temp - 40) / 45.0));
+            Color hub = Ui.Blend(Ui.Good, Ui.Bad, 0.15 + t * 0.85);   // 40°C 起渐变，85°C 到红
+            Color ring = Ui.Blend(hub, Color.Black, 0.3);
+            using (Bitmap bmp = new Bitmap(32, 32))
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (SolidBrush blade = new SolidBrush(Color.FromArgb(238, 243, 250)))
+                using (SolidBrush hubBrush = new SolidBrush(hub))
+                using (Pen ringPen = new Pen(ring, 3f))
+                {
+                    g.DrawEllipse(ringPen, 2, 2, 29, 29);             // 外圈
+                    for (int i = 0; i < 3; i++)                        // 三片扇叶
+                    {
+                        double a = i * 2 * Math.PI / 3 - Math.PI / 2;
+                        float bx = 16 + (float)(Math.Cos(a) * 8), by = 16 + (float)(Math.Sin(a) * 8);
+                        g.FillEllipse(blade, bx - 5, by - 5, 10, 10);
+                    }
+                    g.FillEllipse(hubBrush, 11, 11, 10, 10);           // 轮毂
+                    g.FillEllipse(blade, 14, 14, 4, 4);                // 中心铆钉
+                }
+                return Icon.FromHandle(bmp.GetHicon());
+            }
+        }
+
+        void UpdateTrayIcon()
+        {
+            if (trayIcon == null || sampler == null) return;
+            CpuMode m = CurrentMode();
+            string tip = string.Format("LecooFan {0} {1}\u00B0C / {2} RPM",
+                m != null ? m.Label : "自定义", sampler.Temp, sampler.Rpm);
+            if (tip.Length > 63) tip = tip.Substring(0, 63);
+            trayIcon.Text = tip;
+            if (sampler.Temp == lastTrayTemp && trayIcon.Tag != null) return;
+            lastTrayTemp = sampler.Temp;
+            Icon old = trayIcon.Icon;
+            trayIcon.Icon = BuildFanIcon(sampler.Temp);
+            trayIcon.Tag = new object();
+            if (old != null) old.Dispose();         // 旧图标是 HICON 句柄，不释放会泄漏
+        }
+
+        // ── 配置持久化：启动自动恢复上次的 CPU 档位 + 风扇设置 ──
+
+        void SaveSettings()
+        {
+            if (radFanAuto == null) return;         // BuildUi 之前别写
+            try
+            {
+                CpuMode cur = CurrentMode();
+                string fan = radFanSilent.Checked ? "silent"
+                           : radFanCurve.Checked ? "curve"
+                           : radFanManual.Checked ? "manual" : "auto";
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("cpu=" + (cur != null ? cur.Key : "keep"));
+                sb.AppendLine("fan=" + fan);
+                sb.AppendLine("cap=" + (sampler != null ? sampler.SilentRpmCap : 2000));
+                sb.AppendLine("pwm=" + (sampler != null ? sampler.ManualPwm : 0x30));
+                sb.AppendLine("epp=" + trkEpp.Value);
+                sb.AppendLine("turbo=" + (chkTurbo.Checked ? 1 : 0));
+                sb.AppendLine("cool=" + (cmbCool.SelectedIndex == 0 ? 1 : 0));
+                System.IO.File.WriteAllText(CfgFile, sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        void LoadSettings()
+        {
+            try
+            {
+                if (!System.IO.File.Exists(CfgFile)) return;
+                string cpu = null, fan = null, cap = null, pwm = null, epp = null, turbo = null, cool = null;
+                foreach (string line in System.IO.File.ReadAllLines(CfgFile, Encoding.UTF8))
+                {
+                    string[] kv = line.Split('=');
+                    if (kv.Length != 2) continue;
+                    string k = kv[0].Trim(), v = kv[1].Trim();
+                    if (k == "cpu") cpu = v;
+                    else if (k == "fan") fan = v;
+                    else if (k == "cap") cap = v;
+                    else if (k == "pwm") pwm = v;
+                    else if (k == "epp") epp = v;
+                    else if (k == "turbo") turbo = v;
+                    else if (k == "cool") cool = v;
+                }
+                int n;
+
+                // 微调区滑块的显示状态先恢复（只动 UI，不写电源方案）
+                if (epp != null && int.TryParse(epp, out n))
+                    trkEpp.Value = Math.Max(0, Math.Min(100, n));
+                if (turbo == "1") chkTurbo.Checked = true;
+                else if (turbo == "0") chkTurbo.Checked = false;
+                if (cool != null && int.TryParse(cool, out n)) cmbCool.SelectedIndex = (n == 1) ? 0 : 1;
+
+                // 1) CPU 档位（连同它配套的风扇预设）
+                if (cpu == "perf" || cpu == "bal" || cpu == "quiet" || cpu == "deep")
+                {
+                    CpuMode m = FindMode(cpu);
+                    if (m != null) ApplyMode(m);
+                }
+
+                // 2) 风扇：和预设一致就不用动；不一致说明用户后来手动改过，按保存值覆盖
+                if (fan == "silent")
+                {
+                    int r = 2000;
+                    if (cap != null && int.TryParse(cap, out n) && n > 0) r = n;
+                    cmbRpmCap.SelectedIndex = RpmCapIndex(r);
+                    radFanSilent.Checked = true;
+                }
+                else if (fan == "curve") radFanCurve.Checked = true;
+                else if (fan == "manual")
+                {
+                    if (pwm != null && int.TryParse(pwm, out n))
+                        trkPwm.Value = Math.Max(Sampler.PWM_MIN, Math.Min(Sampler.PWM_MAX, n));
+                    radFanManual.Checked = true;
+                }
+                else if (fan == "auto") radFanAuto.Checked = true;
+
+                Log(string.Format("已恢复上次配置: cpu={0} fan={1}{2}", cpu ?? "keep", fan ?? "auto",
+                    fan == "silent" ? " cap=" + RpmCapValue() + " RPM" : ""));
+            }
+            catch { }
         }
 
         void Log(string s)
@@ -556,6 +806,7 @@ namespace LecooFanGui
             ClientSize = new Size(860, 760);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
+            AutoScaleMode = AutoScaleMode.None;   // 缩放全部由 ScaleTree 手动做，关掉 WinForms 内置的那套
             StartPosition = FormStartPosition.CenterScreen;
             Font = Ui.FontBase;
             BackColor = Ui.WindowBg;
@@ -644,7 +895,7 @@ namespace LecooFanGui
             radFanAuto.ForeColor = Ui.Text;
             radFanAuto.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanAuto);
-            radFanSilent = new RadioButton(); radFanSilent.Text = "静音上限"; radFanSilent.SetBounds(92, 26, 80, 20);
+            radFanSilent = new RadioButton(); radFanSilent.Text = "静音上限"; radFanSilent.SetBounds(92, 26, 110, 20);
             radFanSilent.ForeColor = Ui.Text;
             radFanSilent.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanSilent);
@@ -657,52 +908,46 @@ namespace LecooFanGui
             radFanManual.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanManual);
 
-            // 静音上限的两个参数：目标转速 + 顺手把 CPU 也切到安静档
-            lblRpmCap = new Label(); lblRpmCap.Text = "转速上限"; lblRpmCap.SetBounds(14, 68, 58, 16);
+            // 静音上限的参数：目标转速（模式卡点「安静/极静」会自动带上，也可在这里手动改）
+            lblRpmCap = new Label(); lblRpmCap.Text = "转速上限"; lblRpmCap.SetBounds(14, 80, 58, 16);
             lblRpmCap.ForeColor = Ui.Muted; lblRpmCap.Font = Ui.FontSmall;
             cardFan.Controls.Add(lblRpmCap);
             cmbRpmCap = new ComboBox();
             cmbRpmCap.DropDownStyle = ComboBoxStyle.DropDownList;
             foreach (int r in RpmCaps) cmbRpmCap.Items.Add(r + " RPM");
-            cmbRpmCap.SelectedIndex = 1;                       // 1800 RPM
-            cmbRpmCap.SetBounds(76, 64, 100, 22);
+            cmbRpmCap.SelectedIndex = 2;                       // 2000 RPM（安静档默认，静音已贴 EC 地板）
+            cmbRpmCap.SetBounds(76, 76, 100, 22);
             cmbRpmCap.Enabled = false;
             cmbRpmCap.SelectedIndexChanged += delegate { ApplyRpmCap(); };
             cardFan.Controls.Add(cmbRpmCap);
 
-            chkSilentQuiet = new CheckBox(); chkSilentQuiet.Text = "同步 CPU 安静档"; chkSilentQuiet.SetBounds(186, 65, 190, 20);
-            chkSilentQuiet.ForeColor = Ui.Text;
-            chkSilentQuiet.Checked = true;
-            chkSilentQuiet.Enabled = false;
-            cardFan.Controls.Add(chkSilentQuiet);
-
             lblFanState = new Label();
-            lblFanState.SetBounds(14, 47, 380, 15);
+            lblFanState.SetBounds(14, 48, 380, 26);            // 两行：第二行留给护栏/守护进程提示
             lblFanState.ForeColor = Ui.Muted;
             lblFanState.Font = Ui.FontSmall;
             lblFanState.Text = "状态: —";
             cardFan.Controls.Add(lblFanState);
 
-            Label l3 = new Label(); l3.Text = "PWM"; l3.SetBounds(14, 92, 40, 16); l3.ForeColor = Ui.Muted; cardFan.Controls.Add(l3);
+            Label l3 = new Label(); l3.Text = "PWM"; l3.SetBounds(14, 100, 40, 16); l3.ForeColor = Ui.Muted; cardFan.Controls.Add(l3);
             trkPwm = new TrackBar();
             trkPwm.Minimum = Sampler.PWM_MIN; trkPwm.Maximum = Sampler.PWM_MAX;
-            trkPwm.Value = 0x30; trkPwm.TickFrequency = 8; trkPwm.SetBounds(54, 86, 220, 45);
+            trkPwm.Value = 0x30; trkPwm.TickFrequency = 8; trkPwm.SetBounds(54, 96, 220, 38);
             trkPwm.ValueChanged += delegate
             {
                 sampler.ManualPwm = trkPwm.Value;
                 lblPwmVal.Text = string.Format("0x{0:X2}", trkPwm.Value);
             };
             cardFan.Controls.Add(trkPwm);
-            lblPwmVal = new Label(); lblPwmVal.SetBounds(282, 92, 60, 16); lblPwmVal.ForeColor = Ui.Muted;
+            lblPwmVal = new Label(); lblPwmVal.SetBounds(282, 100, 60, 16); lblPwmVal.ForeColor = Ui.Muted;
             lblPwmVal.Text = "0x30";
             cardFan.Controls.Add(lblPwmVal);
 
             Label l4 = new Label();
-            l4.SetBounds(14, 134, 380, 34);
+            l4.SetBounds(14, 138, 380, 32);
             l4.ForeColor = Ui.Warn;
             l4.Font = Ui.FontSmall;
             l4.Text = "静音上限：锁住转速（EC 下限 ~1700 RPM，比这更低锁不住）\n" +
-                      "护栏 72°C：超温自动放开转速；退出/关闭/温度≥92°C 自动交还 EC";
+                      "护栏 72°C 超温自动放开转速；关窗口 = 退回托盘继续跑";
             cardFan.Controls.Add(l4);
 
             // ── 实时监控（大号读数 + 趋势图）──
@@ -882,9 +1127,11 @@ namespace LecooFanGui
             {
                 Cursor = Cursors.WaitCursor;
                 m.Apply();
+                ApplyFanPreset(m);
                 Log(string.Format("模式 → {0}  ({1})", m.Label, m.Note));
                 SyncModeButtons();
                 RefreshSettingsLine();
+                SaveSettings();
             }
             catch (Exception ex) { Log("应用失败: " + ex.Message); }
             finally { Cursor = Cursors.Default; }
@@ -919,8 +1166,70 @@ namespace LecooFanGui
         }
 
         /// <summary>
-        /// 自检：走一遍用户点「静音上限」的真实事件链（转速下拉 → 单选 → 同步 CPU 安静档），
-        /// 结束后交还 EC，并把测试前的 CPU 档位还原回去（当前是自定义设置时不动电源方案）。
+        /// 自检：依次点击 4 张模式卡，验证每套「CPU + 风扇」整套预设都落地
+        /// （电源键回读 + sampler 风扇模式/转速上限 + 单选钮状态），
+        /// 每档观察 seconds 秒采样温/转速，结束后还原初始档位并交还 EC。
+        /// </summary>
+        public string SelfTestModes(int seconds)
+        {
+            StringBuilder r = new StringBuilder();
+            CpuMode before = CurrentMode();
+            r.AppendLine(string.Format("before: cpu={0} boost={1} epp={2} cool={3}",
+                before != null ? before.Key : "custom", Powr.ReadAc(Powr.BOOST), Powr.ReadAc(Powr.EPP), Powr.ReadAc(Powr.SYSCOOL)));
+
+            int pass = 0;
+            foreach (CpuMode m in Modes)
+            {
+                ModeClick(modeCards[Array.IndexOf(Modes, m)], EventArgs.Empty);   // 走真实点击链路
+                Application.DoEvents();
+                Thread.Sleep(300);                       // 等 Apply 后的回读稳定
+
+                uint boost = Powr.ReadAc(Powr.BOOST), epp = Powr.ReadAc(Powr.EPP), auton = Powr.ReadAc(Powr.AUTON);
+                FanMode wantFan = m.Fan == FanPreset.Auto ? FanMode.Auto : FanMode.Silent;
+                bool ok = boost == m.Boost && epp == m.EppAc && auton == m.Auton
+                       && sampler.Mode == wantFan
+                       && (wantFan != FanMode.Silent || sampler.SilentRpmCap == m.RpmCap)
+                       && radFanSilent.Checked == (wantFan == FanMode.Silent);
+                if (ok) pass++;
+                r.AppendLine(string.Format("click {0,-5} → boost={1} epp={2} auton={3} | fan={4} cap={5} | temp={6}C rpm={7} : {8}",
+                    m.Key, boost, epp, auton, sampler.Mode, sampler.SilentRpmCap,
+                    sampler.Temp, sampler.Rpm, ok ? "PASS" : "FAIL"));
+
+                Stopwatch sw = Stopwatch.StartNew();
+                double sumT = 0, sumR = 0; int n = 0, maxT = -1, maxR = -1;
+                while (sw.Elapsed.TotalSeconds < seconds)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(250);
+                    sumT += sampler.Temp > 0 ? sampler.Temp : 0; sumR += sampler.Rpm > 0 ? sampler.Rpm : 0; n++;
+                    if (sampler.Temp > maxT) maxT = sampler.Temp;
+                    if (sampler.Rpm > maxR) maxR = sampler.Rpm;
+                    r.AppendLine(string.Format("  t={0:0.0}s mode={1} temp={2}C rpm={3} target=0x{4:X2} pwm=0x{5:X2} taken={6}",
+                        sw.Elapsed.TotalSeconds, sampler.Mode, sampler.Temp, sampler.Rpm,
+                        sampler.TargetPwm, sampler.Pwm, sampler.FanTakenOver));
+                }
+                r.AppendLine(string.Format("  {0}: {1}s 均温 {2:0.0}C 最高 {3}C | 均转 {4:0}RPM 最高 {5}RPM",
+                    m.Label, seconds, n > 0 ? sumT / n : 0, maxT, n > 0 ? sumR / n : 0, maxR));
+            }
+
+            radFanAuto.Checked = true;                         // 交还 EC
+            Application.DoEvents();
+            Thread.Sleep(800);
+            if (before != null && CurrentMode() != before)
+            {
+                before.Apply();
+                ApplyFanPreset(before);
+                r.AppendLine("restored cpu+fan preset: " + before.Key);
+            }
+            else r.AppendLine(before != null ? "cpu 未被动过，风扇已交还 EC" : "cpu 是自定义设置，未碰；风扇已交还 EC");
+            r.AppendLine(string.Format("MODES: {0} ({1}/{2} 档位整套预设落地)",
+                pass == Modes.Length ? "PASS" : "FAIL", pass, Modes.Length));
+            return r.ToString();
+        }
+
+        /// <summary>
+        /// 自检：走一遍用户点「静音上限」的真实事件链（转速下拉 → 单选 → 闭环），
+        /// 断言全程不碰 CPU 电源方案，结束后交还 EC，并把测试前的 CPU 档位还原回去。
         /// </summary>
         public string SelfTestSilent(int idx, int seconds)
         {
@@ -929,14 +1238,13 @@ namespace LecooFanGui
             CpuMode before = CurrentMode();
             r.AppendLine(string.Format("before: cpu={0} boost={1} epp={2} cool={3}",
                 before != null ? before.Key : "custom", Powr.ReadAc(Powr.BOOST), Powr.ReadAc(Powr.EPP), Powr.ReadAc(Powr.SYSCOOL)));
-            bool testSync = before != null;
-            if (!testSync) chkSilentQuiet.Checked = false;      // 无法精确还原就不碰电源方案
 
             cmbRpmCap.SelectedIndex = idx;                     // → ApplyRpmCap
-            radFanSilent.Checked = true;                       // → FanModeChanged（含同步 CPU 安静档）
+            radFanSilent.Checked = true;                       // → FanModeChanged（只进闭环，不碰电源方案）
             Application.DoEvents();
-            r.AppendLine(string.Format("clicked silent: cap={0} syncQuiet={1} sliderDisabled={2} cpuNow={3}",
-                sampler.SilentRpmCap, testSync, !trkPwm.Enabled,
+            bool cpuUntouched = before == null ? CurrentMode() == null : CurrentMode() == before;
+            r.AppendLine(string.Format("clicked silent: cap={0} sliderDisabled={1} cpuUntouched={2} cpuNow={3}",
+                sampler.SilentRpmCap, !trkPwm.Enabled, cpuUntouched,
                 (CurrentMode() != null ? CurrentMode().Key : "custom")));
 
             Stopwatch sw = Stopwatch.StartNew();
@@ -953,12 +1261,14 @@ namespace LecooFanGui
             Application.DoEvents();
             Thread.Sleep(800);
             r.AppendLine(string.Format("after auto: mode={0} taken={1} rpm={2}", sampler.Mode, sampler.FanTakenOver, sampler.Rpm));
-            if (testSync && before.Key != "quiet")
+            if (before != null && CurrentMode() != before)
             {
                 before.Apply();
-                r.AppendLine("restored cpu mode: " + before.Key);
+                ApplyFanPreset(before);
+                r.AppendLine("restored cpu+fan preset: " + before.Key);
             }
-            else r.AppendLine(testSync ? "cpu 本来就是 quiet，无需还原" : "跳过同步 CPU 分支（电脑当前是自定义设置，不碰电源方案）");
+            else r.AppendLine(before != null ? "cpu 未被动过，无需还原" : "cpu 是自定义设置，不碰电源方案");
+            r.AppendLine(cpuUntouched ? "SILENT: PASS (电源方案未被切换)" : "SILENT: FAIL (电源方案被切换了)");
             return r.ToString();
         }
 
@@ -988,6 +1298,7 @@ namespace LecooFanGui
                 Log(string.Format("微调已应用: EPP={0}, 睿频={1}, 散热={2}", epp, boost == 0 ? "关" : "开", cool == 1 ? "主动" : "被动"));
                 SyncModeButtons();
                 RefreshSettingsLine();
+                SaveSettings();
             }
             catch (Exception ex) { Log("微调失败: " + ex.Message); }
             finally { Cursor = Cursors.Default; }
@@ -999,11 +1310,35 @@ namespace LecooFanGui
             return RpmCaps[i < 0 || i >= RpmCaps.Length ? 1 : i];
         }
 
+        /// <summary>转速上限值 → 下拉框下标（表里没有就退回 1800）。</summary>
+        int RpmCapIndex(int rpm)
+        {
+            for (int i = 0; i < RpmCaps.Length; i++)
+                if (RpmCaps[i] == rpm) return i;
+            return 1;
+        }
+
+        /// <summary>按模式预设配置风扇。点模式卡 = CPU + 风扇整套预设，
+        /// 之后手动改风扇算微调，再点模式会按预设重置风扇。</summary>
+        void ApplyFanPreset(CpuMode m)
+        {
+            if (m.Fan == FanPreset.Auto)
+            {
+                radFanAuto.Checked = true;                   // → FanModeChanged 交还 EC
+            }
+            else
+            {
+                cmbRpmCap.SelectedIndex = RpmCapIndex(m.RpmCap);   // → ApplyRpmCap
+                radFanSilent.Checked = true;                 // → FanModeChanged 进闭环
+            }
+        }
+
         void ApplyRpmCap()
         {
             if (sampler == null) return;
             sampler.SilentRpmCap = RpmCapValue();
             if (radFanSilent.Checked) Log(string.Format("风扇: 转速上限 → {0} RPM", sampler.SilentRpmCap));
+            SaveSettings();
         }
 
         void FanModeChanged()
@@ -1011,7 +1346,6 @@ namespace LecooFanGui
             if (sampler == null) return;
             bool silent = radFanSilent.Checked;
             cmbRpmCap.Enabled = silent;
-            chkSilentQuiet.Enabled = silent;
             trkPwm.Enabled = !silent;
             if (silent)
             {
@@ -1019,17 +1353,9 @@ namespace LecooFanGui
                 sampler.SilentRpmCap = RpmCapValue();
                 sampler.Mode = FanMode.Silent;
                 Log(string.Format("风扇: 静音上限 {0} RPM（转速闭环，护栏 {1}°C）", sampler.SilentRpmCap, sampler.SilentGuardC));
-                // 勾了「同步 CPU 安静档」就顺手把发热源一起压下去，只在一进入本模式时做一次
-                if (chkSilentQuiet.Checked && !quietAppliedBySilent)
-                {
-                    quietAppliedBySilent = true;
-                    Log("风扇: 同步应用 CPU 安静档");
-                    ApplyMode(FindMode("quiet"));
-                }
             }
             else
             {
-                quietAppliedBySilent = false;
                 if (radFanCurve.Checked)
                 {
                     if (daemonWarning.Length > 0) Log("警告: " + daemonWarning);
@@ -1048,6 +1374,7 @@ namespace LecooFanGui
                     Log("风扇: 交还 EC 自动控制");
                 }
             }
+            SaveSettings();
         }
 
         void RunStress()
@@ -1124,12 +1451,14 @@ namespace LecooFanGui
             MessageBox.Show(this,
                 "本程序做的事：\r\n" +
                 "1) 直接改写当前电源方案里的 CPU 设置（睿频、EPP、散热方式、HWP 自主模式）。\r\n" +
+                "   点「CPU 模式」卡片 = CPU 设置 + 配套风扇一次配好：高性能/平衡 → 风扇 EC 自动；\r\n" +
+                "   安静 → 静音上限 1800 RPM；极静 → 1600 RPM。之后手动改风扇算微调，再点模式会按预设重置。\r\n" +
                 "2) 可选接管 EC 风扇（写 0x1809），退出时自动交还。\r\n" +
                 "   风扇控制共四种：「EC 自动」不动手；「静音上限」按实测转速闭环，锁在选定 RPM 附近；\r\n" +
                 "   「静音曲线」按温度查表（45→0x18 / 55→0x30 / 65→0x50 / 72→0x60 / 78→0x70 / 85→0x78）；\r\n" +
                 "   「手动 PWM」固定写一个值。接管时每 250ms 写一次 0x1809。\r\n" +
                 "   安全边界：EC 自身下限约 1700 RPM（写更低的 PWM 会被抬回来，所以 1800 附近就是地板）；\r\n" +
-                "   「静音上限」自带 74°C 护栏，超温自动放开转速，温度≥92°C 一律交还 EC。\r\n" +
+                "   「静音上限」自带 72°C 护栏，超温自动放开转速，温度≥92°C 一律交还 EC。\r\n" +
                 "3) 只读取 EC 温度/转速/PWM，以及 Windows 性能计数器的每核频率。\r\n\r\n" +
                 "本机的实测结论（14 进程满载 / 同一跑分）：\r\n" +
                 "· 「最大处理器状态」和「处理器最大频率」被固件忽略（设 50% 仍跑到 4.2GHz）。\r\n" +
@@ -1193,6 +1522,7 @@ namespace LecooFanGui
             if (sampler.LastError.Length > 0) { Log("错误: " + sampler.LastError); sampler.LastError = ""; }
             RefreshSettingsLine();
             RefreshFanState();
+            UpdateTrayIcon();
         }
 
         void RefreshFanState()
@@ -1200,21 +1530,37 @@ namespace LecooFanGui
             string s;
             if (!ec.Available) s = "EC 不可用，风扇控制已禁用。温度/转速请用 python lecoofan.py --status 查看。";
             else if (sampler.Mode == FanMode.Silent)
-                s = string.Format("状态: 静音上限 {0} RPM — 实测 {1} RPM / PWM 0x{2:X2}{3}",
+                s = string.Format("静音上限 {0} RPM — 实测 {1} RPM / PWM 0x{2:X2}{3}",
                     sampler.SilentRpmCap, sampler.Rpm, sampler.Pwm,
                     sampler.SilentLaidOpen ? string.Format("  ← 超过护栏 {0}°C，已放开转速", sampler.SilentGuardC) : "");
-            else if (sampler.FanTakenOver) s = string.Format("状态: 已接管 EC  (目标 0x{0:X2}, 实测 0x{1:X2})", sampler.TargetPwm, sampler.Pwm);
-            else s = "状态: EC 自动控制 (本程序未接管)";
-            if (daemonWarning.Length > 0) s += "\r\n注意: python 守护进程在运行";
+            else if (sampler.FanTakenOver) s = string.Format("已接管 EC  (目标 0x{0:X2}, 实测 0x{1:X2})", sampler.TargetPwm, sampler.Pwm);
+            else s = "EC 自动控制 (本程序未接管)";
+            if (daemonWarning.Length > 0) s += "\r\n⚠ python 守护进程在运行，会和本程序抢 EC";
             lblFanState.Text = s;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (trayMode && !allowClose)
+            {
+                // 托盘/自启动模式：关窗口只是收回后台，配置和风扇控制继续跑
+                e.Cancel = true;
+                Hide();
+                ShowInTaskbar = false;
+                if (!balloonShown)
+                {
+                    balloonShown = true;
+                    if (trayIcon != null) trayIcon.ShowBalloonTip(6000, "LecooFan 仍在后台运行",
+                        "控制台已收回托盘；双击图标随时打开，右键菜单可「交还风扇给 EC」或退出。", ToolTipIcon.Info);
+                }
+                return;
+            }
+            SaveSettings();
             try
             {
                 soak.Running = false;
                 if (sampler != null) { sampler.Mode = FanMode.Auto; sampler.Stop(); }
+                if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
             }
             catch { }
             base.OnFormClosing(e);
@@ -1249,8 +1595,9 @@ namespace LecooFanGui
                 string name = (c.Text != null && c.Text.Length > 0) ? c.Text : c.GetType().Name;
                 if (name.Length > 28) name = name.Substring(0, 28);
                 name = name.Replace("\r", " ").Replace("\n", " | ");
-                sb.AppendLine(string.Format("{0}{1,-14} x={2,4} y={3,4} w={4,4} h={5,3}  {6}",
-                    new string(' ', depth * 2), c.GetType().Name, c.Left, c.Top, c.Width, c.Height, name));
+                sb.AppendLine(string.Format("{0}{1,-14} x={2,4} y={3,4} w={4,4} h={5,3}{6}  {7}",
+                    new string(' ', depth * 2), c.GetType().Name, c.Left, c.Top, c.Width, c.Height,
+                    c.Font != null ? string.Format(" {0:0.#}pt", c.Font.SizeInPoints) : "", name));
                 if (c.Left < 0 || c.Top < 0 || c.Right > parent.ClientSize.Width || c.Bottom > parent.ClientSize.Height)
                 {
                     sb.AppendLine(string.Format("    !! 超出父容器: {0} (父 {1}) 子底={2}", name, parent.ClientSize, c.Bottom));
@@ -1285,6 +1632,36 @@ namespace LecooFanGui
                                 boxes[i].GetType().Name + ":" + boxes[i].Text, boxes[j].GetType().Name + ":" + boxes[j].Text));
                             problems++;
                         }
+            }
+        }
+
+        /// <summary>PowerShell 单引号字符串字面量：路径里的单引号翻倍转义。</summary>
+        static string PsQ(string s) { return "'" + s.Replace("'", "''") + "'"; }
+
+        /// <summary>跑外部工具（schtasks / powershell，设置开机自启动用）。返回退出码，输出文本经 out 带回。</summary>
+        static int RunTool(string exe, string args, out string output)
+        {
+            try
+            {
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(exe, args);
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.CreateNoWindow = true;
+                System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi);
+                string o = p.StandardOutput.ReadToEnd(), er = p.StandardError.ReadToEnd();
+                p.WaitForExit();
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("$ " + exe + " " + args + "   → exit=" + p.ExitCode);
+                if (o.Length > 0) sb.AppendLine(o.Trim());
+                if (er.Length > 0) sb.AppendLine(er.Trim());
+                output = sb.ToString();
+                return p.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                output = exe + " ERROR: " + ex.Message;
+                return -1;
             }
         }
 
@@ -1385,34 +1762,24 @@ namespace LecooFanGui
                 else if (cmd == "--dumpui")
                 {
                     // 布局自检：建好窗体 → 输出控件树绝对坐标 → 检测卡片重叠/子控件溢出
-                    MainForm f = new MainForm();
+                    // 第二个参数可指定 DPI 缩放（如 1.5 / 2），验证高分辨率屏上的等比布局
+                    if (args.Length >= 2)
+                    {
+                        float sc;
+                        if (float.TryParse(args[1], out sc) && sc > 0f) dpiScaleForTest = sc;
+                    }
+                    MainForm f = new MainForm(true);
                     f.Show();
                     Application.DoEvents();
-                    sb.AppendLine(string.Format("form client={0}x{1}", f.ClientSize.Width, f.ClientSize.Height));
+                    sb.AppendLine(string.Format("form client={0}x{1} scale={2:0.##}", f.ClientSize.Width, f.ClientSize.Height, DpiScale));
+                    if (dpiScaleForTest > 0f && dpiScaleForTest < ComputeDpiScale())
+                    {
+                        sb.AppendLine("注意: 模拟缩放低于本机真实 DPI 时，原生控件（TrackBar 最小高度随 DPI 走）与字号测量仍按真实 DPI，");
+                        sb.AppendLine("      可能报少量 1-2px 的假溢出；只看『超出父容器』里超过 3px 的项即可。");
+                    }
                     DumpTree(f, f, 0, sb, ref problems);
                     sb.AppendLine(problems == 0 ? "LAYOUT: PASS (无重叠/无溢出)" : "LAYOUT: FAIL (" + problems + " 处问题)");
                     f.Close();
-                }
-                else if (cmd == "--fan-hold" && args.Length >= 2)
-                {
-                    // 锁定固定 PWM 一段时间：用来验证"程序被强杀后 EC 是否自动接管"
-                    string raw = args[1].Replace("0x", "").Replace("0X", "");
-                    int pwm = Convert.ToInt32(raw, 16);
-                    int secs = args.Length >= 3 ? int.Parse(args[2]) : 30;
-                    Ec e = new Ec();
-                    Sampler s = new Sampler(e);
-                    s.Mode = FanMode.Manual;
-                    s.ManualPwm = pwm;
-                    s.Start();
-                    for (int i = 0; i < secs * 2; i++)
-                    {
-                        Thread.Sleep(500);
-                        sb.AppendLine(string.Format("t={0:0.0}s temp={1}C target=0x{2:X2} pwm=0x{3:X2} rpm={4} taken={5}",
-                            i * 0.5, s.Temp, s.TargetPwm, s.Pwm, s.Rpm, s.FanTakenOver));
-                    }
-                    s.Mode = FanMode.Auto;
-                    s.Stop();
-                    sb.AppendLine("hold finished (graceful release)");
                 }
                 else if (cmd == "--fan-cap" && args.Length >= 2)
                 {
@@ -1442,12 +1809,24 @@ namespace LecooFanGui
                     Thread.Sleep(1000);
                     sb.AppendLine(string.Format("after release: pwm=0x{0:X2} rpm={1} (EC auto resumed)", e.FanPwm(), e.FanRpm()));
                 }
+                else if (cmd == "--ui-modes")
+                {
+                    // 真窗体自检：依次点 4 张模式卡，验证「CPU + 风扇」整套预设都落地
+                    int secs = args.Length >= 2 ? int.Parse(args[1]) : 5;
+                    MainForm f = new MainForm(true);
+                    f.Show();
+                    Application.DoEvents();
+                    sb.Append(f.SelfTestModes(secs));
+                    f.Close();
+                    Application.DoEvents();
+                    sb.AppendLine("form closed");
+                }
                 else if (cmd == "--ui-silent" && args.Length >= 2)
                 {
                     // 真窗体自检：点一下「静音上限」，看 UI 事件链 + 闭环是否真的生效
                     int rpm = int.Parse(args[1]);
                     int secs = args.Length >= 3 ? int.Parse(args[2]) : 3;
-                    MainForm f = new MainForm();
+                    MainForm f = new MainForm(true);
                     f.Show();
                     Application.DoEvents();
                     sb.Append(f.SelfTestSilent(Array.IndexOf(RpmCaps, rpm), secs));
@@ -1468,9 +1847,12 @@ namespace LecooFanGui
                     }
                     Ec e = new Ec();
                     Sampler s = new Sampler(e);
+                    s.SilentRpmCap = 2000;                   // fan=silent 时的默认静音上限
                     s.Start();
                     Thread.Sleep(1500);
-                    FanMode fm = fanArg == "curve" ? FanMode.Curve : (fanArg == "manual" ? FanMode.Manual : FanMode.Auto);
+                    FanMode fm = fanArg == "curve" ? FanMode.Curve
+                              : (fanArg == "manual" ? FanMode.Manual
+                              : (fanArg == "silent" ? FanMode.Silent : FanMode.Auto));
                     Soak sk = new Soak();
                     int lines = 0;
                     sk.Run(seconds, s, fm, modeKey + "/" + fanArg, delegate (string line)
@@ -1485,6 +1867,66 @@ namespace LecooFanGui
                         Powr.ReadAc(Powr.BOOST), Powr.ReadAc(Powr.EPP), Powr.ReadDc(Powr.EPP),
                         Powr.ReadAc(Powr.SYSCOOL), Powr.ReadDc(Powr.SYSCOOL), Powr.ReadAc(Powr.AUTON)));
                 }
+                else if (cmd == "--install-autostart")
+                {
+                    // 开机自启动 = 两件事配合：
+                    //   ① 计划任务（登录时 / 最高权限 / 直接进托盘，不弹窗口）。用 PowerShell 注册而不是
+                    //      schtasks /Create：后者默认电池策略是「拔电源就停」，笔记本离电风扇控制会被杀掉。
+                    //   ② 注册表 Run 键 → LecooFanTray.exe（无清单的启动桩）。计划任务不会出现在
+                    //      「任务管理器 → 启动应用」列表里，Run 键才会；桩只负责触发那个计划任务，
+                    //      自己不提权、不弹 UAC。真正干活的始终是计划任务。
+                    const string taskName = "LecooFan";
+                    const string runKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+                    const string runName = "LecooFan";
+                    // PowerShell 单引号字符串：路径里的单引号要翻倍转义（见 PsQ）
+                    string ps =
+                        "$a = New-ScheduledTaskAction -Execute " + PsQ(typeof(MainForm).Assembly.Location) + " -Argument '--tray';" +
+                        "$t = New-ScheduledTaskTrigger -AtLogOn;" +
+                        "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew;" +
+                        "$p = New-ScheduledTaskPrincipal -UserId " + PsQ(Environment.UserDomainName + "\\" + Environment.UserName) + " -LogonType Interactive -RunLevel Highest;" +
+                        "Register-ScheduledTask -TaskName " + PsQ(taskName) +
+                        " -Action $a -Trigger $t -Settings $s -Principal $p" +
+                        " -Description 'LecooFan GUI: N175L EC fan control + CPU modes (tray autostart)' -Force | Out-Null";
+                    string o;
+                    int rc = RunTool("powershell", "-NoProfile -NonInteractive -Command \"" + ps + "\"", out o);
+                    sb.Append(o);
+                    sb.AppendLine(rc == 0
+                        ? "已设置开机自启动（计划任务 " + taskName + "：登录时以最高权限启动，直接进托盘，不弹窗口；电池下也继续跑）。"
+                        : "计划任务设置失败：请用管理员身份运行 `LecooFanGUI.exe --install-autostart`。");
+                    // 启动项（任务管理器"启动应用"里可见）：指向启动桩，不是 GUI 本体——GUI 带
+                    // requireAdministrator 清单，非提权拉起会弹 UAC；桩无清单，只去触发计划任务。
+                    string stub = System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(typeof(MainForm).Assembly.Location), "LecooFanTray.exe");
+                    if (System.IO.File.Exists(stub))
+                    {
+                        int rc2 = RunTool("reg", "add \"" + runKey + "\" /v " + runName + " /t REG_SZ /d \\\"" + stub + "\\\" /f", out o);
+                        sb.Append(o);
+                        sb.AppendLine(rc2 == 0
+                            ? "已添加启动项 " + runName + "（任务管理器 → 启动应用 里可见；触发上面的计划任务，不弹 UAC）。"
+                            : "启动项添加失败（不影响计划任务，风扇控制仍会在登录时启动）。");
+                    }
+                    else
+                    {
+                        sb.AppendLine("未找到 " + System.IO.Path.GetFileName(stub) + "，跳过启动项（计划任务已装好；用 README 里的编译命令补上启动桩后可以再跑一次本命令）。");
+                    }
+                }
+                else if (cmd == "--uninstall-autostart")
+                {
+                    const string taskName = "LecooFan";
+                    const string runKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+                    const string runName = "LecooFan";
+                    string o;
+                    int rc = RunTool("schtasks", "/Delete /TN \"" + taskName + "\" /F", out o);
+                    sb.Append(o);
+                    sb.AppendLine(rc == 0
+                        ? "已删除开机自启动（计划任务 " + taskName + "）。"
+                        : "删除失败（任务可能本来就不存在，或权限不足）。");
+                    int rc2 = RunTool("reg", "delete \"" + runKey + "\" /v " + runName + " /f", out o);
+                    sb.Append(o);
+                    sb.AppendLine(rc2 == 0
+                        ? "已删除启动项 " + runName + "（任务管理器 → 启动应用 里不再显示）。"
+                        : "启动项删除失败（可能本来就不存在）。");
+                }
                 else if (cmd == "--fan-off")
                 {
                     Ec e = new Ec();
@@ -1496,8 +1938,13 @@ namespace LecooFanGui
                 {
                     sb.AppendLine("usage: LecooFanGUI.exe --apply <perf|bal|quiet|deep> | --report | --fan-off");
                     sb.AppendLine("       LecooFanGUI.exe --fan-cap <rpm> [sec] [cpumode] [guardC]   # 静音上限，锁转速");
+                    sb.AppendLine("       LecooFanGUI.exe --ui-modes [sec]   # 真窗体自检：依次点 4 张模式卡验证整套预设");
                     sb.AppendLine("       LecooFanGUI.exe --ui-silent <rpm> [sec]   # 真窗体自检：点一下「静音上限」");
-                    sb.AppendLine("       LecooFanGUI.exe --fan-curve <sec> | --fan-hold <pwm> <sec> | --soak <sec> [mode] [fan] | --dumpui");
+                    sb.AppendLine("       LecooFanGUI.exe --fan-curve <sec> | --soak <sec> [mode] [fan] | --dumpui [scale]");
+                    sb.AppendLine("           其中 fan = auto | silent(默认锁 2000 RPM) | curve | manual");
+                    sb.AppendLine("       LecooFanGUI.exe --tray     # 后台运行：进通知区托盘，不弹窗口（开机自启动同款）");
+                    sb.AppendLine("       LecooFanGUI.exe --install-autostart | --uninstall-autostart   # 设置/取消开机自启动（需管理员）");
+                    sb.AppendLine("           同时装两处：计划任务(干活,无声无UAC) + Run启动项 LecooFanTray.exe(任务管理器启动应用里可见)");
                 }
             }
             catch (Exception ex) { sb.AppendLine("ERROR: " + ex.Message); }
@@ -1509,10 +1956,69 @@ namespace LecooFanGui
             try { System.IO.File.WriteAllText(path, sb.ToString(), Encoding.UTF8); } catch { }
         }
 
+        static Mutex oneInstance;
+
+        /// <summary>
+        /// 单实例保护（只守 GUI/托盘入口，--report/--dumpui 等自检路径不走这里）。
+        /// 已有实例在跑时返回 false：两个进程同时覆写 0x1809 会互相抢 EC，必须避免。
+        /// </summary>
+        static bool EnsureSingleInstance()
+        {
+            try
+            {
+                bool isNew;
+                oneInstance = new Mutex(true, "LecooFanGUI", out isNew);
+                return isNew;
+            }
+            catch { return true; }  // mutex 出问题就别互相挡，照常启动
+        }
+
+        /// <summary>MainForm 构造前就能用的日志（单实例提示写在窗口还没建起来时）。</summary>
+        static void LogLine(string msg)
+        {
+            try
+            {
+                System.IO.File.AppendAllText(LogFile, string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, msg));
+            }
+            catch { }
+        }
+
         [STAThread]
         static void Main(string[] args)
         {
+            bool tray = false;
+            foreach (string a in args) if (a == "--tray") tray = true;
+
+            if (tray)
+            {
+                if (!EnsureSingleInstance())
+                {
+                    // 托盘模式发现已有实例：静默退出（开机自启动/启动桩触发时不能弹窗）
+                    LogLine("检测到已有实例在运行，本次托盘启动直接退出。");
+                    return;
+                }
+                // 开机自启动同款入口：进通知区托盘后台运行，不弹窗口，配置照样自动恢复
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                try
+                {
+                    MainForm f = new MainForm();
+                    f.EnableTray();
+                    Application.Run(f);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("启动失败: " + ex.Message + "\r\n\r\n请确认以管理员身份运行。", "LecooFan GUI");
+                }
+                return;
+            }
+
             if (args.Length > 0) { RunCli(args); return; }
+            if (!EnsureSingleInstance())
+            {
+                MessageBox.Show("LecooFan 已经在运行（窗口或托盘）。\r\n托盘里右键图标可以打开控制台。", "LecooFan");
+                return;
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             try
