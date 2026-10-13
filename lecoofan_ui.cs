@@ -37,12 +37,35 @@ namespace LecooFanGui
         public static readonly Color LogBg = Color.FromArgb(28, 33, 40);
         public static readonly Color LogText = Color.FromArgb(198, 208, 220);
 
+        /// <summary>高 DPI 缩放比（1 = 96 DPI / 100%）。必须在首次取字体之前调用 SetScaleBaked。</summary>
+        public static float Scale = 1f;
+        /// <summary>字号乘数。生产环境恒为 1：字号按“点”给，Windows 在高 DPI 屏上会自动放大，
+        /// 和坐标的等比放大天然配套，谁再乘一次就会字比布局大一截、全部挤成一团。
+        /// 测试模式（--dumpui [scale]）才按“目标缩放 / 本机缩放”放大，用来在任意机器上模拟别的 DPI。</summary>
+        public static float FontScale = 1f;
+
+        public static void SetScaleBaked(float scale, float fontScale)
+        {
+            Scale = scale;
+            FontScale = fontScale;
+            _base = null; _cardTitle = null; _big = null; _small = null; _mono = null;
+        }
+
+        /// <summary>字体在 SetScaleBaked 时就已经建好，这里强制全部实例化一遍，防止 BuildUi 之前建过未缩放的。</summary>
+        public static void TouchFonts() { Font g; g = FontBase; g = FontCardTitle; g = FontBig; g = FontSmall; g = FontMono; }
+
+        /// <summary>像素值按缩放比取整。</summary>
+        public static int S(int v) { return (int)Math.Round(v * Scale); }
+
+        /// <summary>按字号乘数现建一个字体（自绘代码里用）。</summary>
+        public static Font F(float pt, FontStyle style) { return new Font("Microsoft YaHei UI", pt * FontScale, style); }
+
         static Font _base, _cardTitle, _big, _small, _mono;
-        public static Font FontBase { get { if (_base == null) _base = new Font("Microsoft YaHei UI", 9F); return _base; } }
-        public static Font FontCardTitle { get { if (_cardTitle == null) _cardTitle = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold); return _cardTitle; } }
-        public static Font FontBig { get { if (_big == null) _big = new Font("Microsoft YaHei UI", 19F, FontStyle.Bold); return _big; } }
-        public static Font FontSmall { get { if (_small == null) _small = new Font("Microsoft YaHei UI", 8F); return _small; } }
-        public static Font FontMono { get { if (_mono == null) _mono = new Font("Consolas", 8.5F); return _mono; } }
+        public static Font FontBase { get { if (_base == null) _base = F(9f, FontStyle.Regular); return _base; } }
+        public static Font FontCardTitle { get { if (_cardTitle == null) _cardTitle = F(9f, FontStyle.Bold); return _cardTitle; } }
+        public static Font FontBig { get { if (_big == null) _big = F(19f, FontStyle.Bold); return _big; } }
+        public static Font FontSmall { get { if (_small == null) _small = F(8f, FontStyle.Regular); return _small; } }
+        public static Font FontMono { get { if (_mono == null) _mono = new Font("Consolas", 8.5f * FontScale, FontStyle.Regular); return _mono; } }
 
         public static Color ModeAccent(string key)
         {
@@ -119,15 +142,15 @@ namespace LecooFanGui
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Ui.WindowBg);
             Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
-            using (GraphicsPath p = Ui.Round(r, 7))
+            using (GraphicsPath p = Ui.Round(r, Ui.S(7)))
             {
                 using (SolidBrush bg = new SolidBrush(Ui.CardBg)) g.FillPath(bg, p);
                 using (Pen pen = new Pen(Ui.Border)) g.DrawPath(pen, p);
             }
             using (SolidBrush dot = new SolidBrush(Ui.Accent))
-                g.FillEllipse(dot, 11, 11, 7, 7);
+                g.FillEllipse(dot, Ui.S(11), Ui.S(11), Ui.S(7), Ui.S(7));
             using (SolidBrush t = new SolidBrush(Ui.Title))
-                g.DrawString(Text, Ui.FontCardTitle, t, 24, 8);
+                g.DrawString(Text, Ui.FontCardTitle, t, Ui.S(24), Ui.S(8));
         }
     }
 
@@ -163,22 +186,22 @@ namespace LecooFanGui
 
             Color accent = Ui.ModeAccent(Mode.Key);
             Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
-            using (GraphicsPath p = Ui.Round(r, 7))
+            using (GraphicsPath p = Ui.Round(r, Ui.S(7)))
             {
                 Color fill = Active ? Ui.Blend(accent, Color.White, 0.88)
                             : (hover ? Color.FromArgb(250, 251, 253) : Color.White);
                 using (SolidBrush bg = new SolidBrush(fill)) g.FillPath(bg, p);
-                using (Pen pen = new Pen(Active ? accent : Ui.Border, Active ? 2f : 1f)) g.DrawPath(pen, p);
+                using (Pen pen = new Pen(Active ? accent : Ui.Border, Active ? Ui.Scale * 2f : 1f)) g.DrawPath(pen, p);
             }
 
             using (SolidBrush bar = new SolidBrush(accent))
-                g.FillEllipse(bar, 12, 14, 9, 9);
+                g.FillEllipse(bar, Ui.S(12), Ui.S(14), Ui.S(9), Ui.S(9));
 
-            using (Font lf = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold))
+            using (Font lf = Ui.F(10.5f, FontStyle.Bold))
             using (SolidBrush lb = new SolidBrush(Active ? Ui.Blend(accent, Color.Black, 0.25) : Ui.Text))
-                g.DrawString(Mode.Label, lf, lb, 28, 9);
+                g.DrawString(Mode.Label, lf, lb, Ui.S(28), Ui.S(9));
 
-            Rectangle note = new Rectangle(28, 32, Width - 36, Height - 36);
+            Rectangle note = new Rectangle(Ui.S(28), Ui.S(32), Width - Ui.S(36), Height - Ui.S(36));
             using (SolidBrush nb = new SolidBrush(Ui.Muted))
             using (StringFormat sf = new StringFormat())
             {
@@ -187,9 +210,9 @@ namespace LecooFanGui
             }
             if (Active)
             {
-                using (Font af = new Font("Microsoft YaHei UI", 7.5F, FontStyle.Bold))
+                using (Font af = Ui.F(7.5f, FontStyle.Bold))
                 using (SolidBrush ab = new SolidBrush(accent))
-                    g.DrawString("当前", af, ab, Width - 34, 11);
+                    g.DrawString("当前", af, ab, Width - Ui.S(34), Ui.S(11));
             }
         }
     }
@@ -226,7 +249,7 @@ namespace LecooFanGui
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(BackColor);
-            Rectangle plot = new Rectangle(6, 6, Width - 12, Height - 22);
+            Rectangle plot = new Rectangle(Ui.S(6), Ui.S(6), Width - Ui.S(12), Height - Ui.S(22));
             using (Pen grid = new Pen(Color.FromArgb(238, 241, 246)))
             {
                 for (int i = 0; i <= 4; i++)
@@ -239,7 +262,7 @@ namespace LecooFanGui
             if (temp.Count < 2)
             {
                 using (SolidBrush b = new SolidBrush(Ui.Muted))
-                    g.DrawString("趋势图：正在采集…", Ui.FontSmall, b, plot.Left + 4, plot.Top + 4);
+                    g.DrawString("趋势图：正在采集…", Ui.FontSmall, b, plot.Left + Ui.S(4), plot.Top + Ui.S(4));
                 DrawLegend(g, plot);
                 return;
             }
@@ -251,8 +274,8 @@ namespace LecooFanGui
             float lastTemp = temp[temp.Count - 1];
             int ty = plot.Bottom - (int)((lastTemp - 25f) / 75f * plot.Height);
             using (SolidBrush b = new SolidBrush(Ui.Accent))
-            using (Font f = new Font("Microsoft YaHei UI", 8F, FontStyle.Bold))
-                g.DrawString(string.Format("{0:0}°C", lastTemp), f, b, plot.Right - 46, Math.Max(plot.Top, Math.Min(plot.Bottom - 14, ty - 8)));
+            using (Font f = Ui.F(8f, FontStyle.Bold))
+                g.DrawString(string.Format("{0:0}°C", lastTemp), f, b, plot.Right - Ui.S(46), Math.Max(plot.Top, Math.Min(plot.Bottom - Ui.S(14), ty - Ui.S(8))));
 
             DrawLegend(g, plot);
         }
@@ -274,11 +297,11 @@ namespace LecooFanGui
 
         void DrawLegend(Graphics g, Rectangle plot)
         {
-            using (Font f = new Font("Microsoft YaHei UI", 7.5F))
+            using (Font f = Ui.F(7.5f, FontStyle.Regular))
             {
                 string s = string.Format("温度(蓝)   转速(灰 0-5500)   PWM(橙 0-255)   点数 {0}", temp.Count);
                 using (SolidBrush b = new SolidBrush(Ui.Muted))
-                    g.DrawString(s, f, b, plot.Left, plot.Bottom + 2);
+                    g.DrawString(s, f, b, plot.Left, plot.Bottom + Ui.S(2));
             }
         }
     }
