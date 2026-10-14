@@ -3,11 +3,11 @@
 .SYNOPSIS>
     打包 LecooFan 安装包：
       1. staging:  dist/LecooFan-Setup-<ver>/   （exe + 安装脚本 + README + LICENSE + 源码）
-      2. zip:      dist/LecooFan-Setup-<ver>.zip
-      3. -WithSfx:  dist/LecooFan-Setup-<ver>.exe （7-Zip 自解压，解压完自动跑 install.bat）
-                  默认关闭：本机 7-Zip 26.02 的 SFX 模块读不到内嵌配置
-                  （InstallPath/RunProgram 全部被忽略，退化成"往当前目录解压"），
-                  修好之前自解压 exe 不是一个可用的安装包，只有 zip 是。
+      2. zip:      dist/LecooFan-Setup-<ver>.zip   （便携 / 源码形态）
+      3. exe:      dist/LecooFan-Setup-<ver>.exe   （★ 主发布物：引导安装器，内嵌全部安装
+                   文件，双击 → 一次 UAC → 调 Install-LecooFan.ps1 注册好全部服务）
+      4. -WithSfx: dist/LecooFan-Setup-<ver>-sfx.exe （旧实验：7-Zip 自解压。本机 7-Zip 26.02
+                   的 SFX 模块读不到内嵌配置，退化成"解压到当前目录"，默认不构建）
     用法: powershell -File installer\build-package.ps1 [-Version 1.0.1] [-WithSfx]
 #>
 [CmdletBinding()]
@@ -68,12 +68,38 @@ Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optima
 $zipKb = [math]::Round((Get-Item $zip).Length / 1KB)
 Write-Host ("  {0}  ({1} KB)" -f (Split-Path $zip -Leaf), $zipKb)
 
-# ─── 3. 7-Zip SFX 自解压安装 exe（可选，见文件头说明）─────────────────────────
+# ─── 3. 引导安装器 exe（主发布物：内嵌全部安装文件，双击即装）────────────────
+Write-Step "生成安装 exe（引导安装器）"
+$setupExe = Join-Path $dist "LecooFan-Setup-$Version.exe"
+if (Test-Path $setupExe) { Remove-Item $setupExe -Force }
+
+$csc = @("C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+         "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $csc) { throw "找不到 csc.exe（.NET Framework 4 编译器），无法生成安装 exe" }
+
+# staging 里每个文件都作为 payload/<相对路径> 资源嵌进 exe（安装器解压时原样写回）
+$resArgs = @()
+foreach ($f in (Get-ChildItem $stage -Recurse -File)) {
+    $rel = $f.FullName.Substring($stage.Length + 1) -replace '\\', '/'
+    $resArgs += ("/resource:{0},payload/{1}" -f $f.FullName, $rel)
+}
+$cscArgs = @("-nologo", "-codepage:65001", "-target:winexe", ("-out:" + $setupExe),
+             ("-win32manifest:" + (Join-Path $PSScriptRoot "setup.manifest")),
+             ("-win32icon:" + (Join-Path $PSScriptRoot "lecoofan.ico")),
+             "-r:System.dll", "-r:System.Windows.Forms.dll", "-r:System.Drawing.dll") +
+           $resArgs + @((Join-Path $PSScriptRoot "lecoofan_setup.cs"))
+& $csc @cscArgs
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $setupExe)) { throw "安装器 exe 编译失败 (csc rc=$LASTEXITCODE)" }
+$setupKb = [math]::Round((Get-Item $setupExe).Length / 1KB)
+Write-Host ("  {0}  ({1} KB)" -f (Split-Path $setupExe -Leaf), $setupKb)
+
+# ─── 4. 7-Zip SFX 自解压（旧实验，可选，见文件头说明）───────────────────────
 if (-not $WithSfx) {
-    Write-Host "`n>>> SFX skipped (-WithSfx to enable; 7-Zip 26.02 config not honored on this machine)"
+    Write-Host "`n>>> SFX skipped (legacy experiment; -WithSfx to enable)"
 } else {
-Write-Step "7-Zip SFX 自解压安装 exe"
-$sfx = Join-Path $dist "LecooFan-Setup-$Version.exe"
+Write-Step "7-Zip SFX 自解压 exe"
+$sfx = Join-Path $dist "LecooFan-Setup-$Version-sfx.exe"
 if (Test-Path $sfx) { Remove-Item $sfx -Force }
 
 $sevenZip = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe") |
