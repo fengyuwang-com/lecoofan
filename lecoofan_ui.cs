@@ -120,6 +120,25 @@ namespace LecooFanGui
                 (int)(a.G + (b.G - a.G) * t),
                 (int)(a.B + (b.B - a.B) * t));
         }
+
+        /// <summary>单行高度（TextRenderer 口径，和 TextFits 同一把尺子）。</summary>
+        public static int LineHeight(Font f)
+        {
+            return TextRenderer.MeasureText("汉字Ag", f, new Size(int.MaxValue, int.MaxValue),
+                TextFormatFlags.NoPadding).Height;
+        }
+
+        /// <summary>
+        /// 一段文字在给定宽高里放不放得下（TextRenderer + NoPadding，和布局自检同一把尺子）。
+        /// 放不下就整块不画或退化成一行 —— 切掉半行字比不显示更难看，用户会以为界面坏了。
+        /// </summary>
+        public static bool TextFits(string text, Font f, int w, int h)
+        {
+            if (string.IsNullOrEmpty(text) || w < 8 || h < 8) return false;
+            Size need = TextRenderer.MeasureText(text, f, new Size(w, int.MaxValue),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+            return need.Height <= h + 2;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -197,23 +216,62 @@ namespace LecooFanGui
             using (SolidBrush bar = new SolidBrush(accent))
                 g.FillEllipse(bar, Ui.S(12), Ui.S(14), Ui.S(9), Ui.S(9));
 
+            // 标签椭圆截断：窗口缩小后模式卡会变窄，宁可显示「平衡(原厂…」也不要溢出卡片；
+            // 卡片矮到一行标题都放不下时整块不画（半截字比不画更难看）
+            Rectangle title = new Rectangle(Ui.S(28), Ui.S(9), Width - Ui.S(28) - Ui.S(38), Ui.S(20));
             using (Font lf = Ui.F(10.5f, FontStyle.Bold))
             using (SolidBrush lb = new SolidBrush(Active ? Ui.Blend(accent, Color.Black, 0.25) : Ui.Text))
-                g.DrawString(Mode.Label, lf, lb, Ui.S(28), Ui.S(9));
+            using (StringFormat tf = new StringFormat())
+            {
+                tf.Trimming = StringTrimming.EllipsisCharacter;
+                tf.FormatFlags = StringFormatFlags.NoWrap;
+                if (Ui.TextFits(Mode.Label, lf, title.Width, Math.Min(title.Height, Height - Ui.S(9))))
+                    g.DrawString(Mode.Label, lf, lb, title, tf);
+            }
 
-            Rectangle note = new Rectangle(Ui.S(28), Ui.S(32), Width - Ui.S(36), Height - Ui.S(36));
+            // 说明三档退化：完整两行 → 首行（横向省略号）→ 整块不画。任何一档都不切字。
+            Rectangle note = NoteRect();
+            int lh = Ui.LineHeight(Ui.FontSmall);
             using (SolidBrush nb = new SolidBrush(Ui.Muted))
             using (StringFormat sf = new StringFormat())
             {
                 sf.Trimming = StringTrimming.EllipsisCharacter;
-                g.DrawString(Mode.Note, Ui.FontSmall, nb, note, sf);
+                if (Ui.TextFits(Mode.Note, Ui.FontSmall, note.Width, note.Height))
+                    g.DrawString(Mode.Note, Ui.FontSmall, nb,
+                        new RectangleF(note.X, note.Y, note.Width, note.Height + Ui.S(2)), sf);
+                else if (note.Height >= lh + Ui.S(4))
+                {
+                    sf.FormatFlags = StringFormatFlags.NoWrap;
+                    g.DrawString(FirstNoteLine(), Ui.FontSmall, nb,
+                        new RectangleF(note.X, note.Y, note.Width, lh + Ui.S(4)), sf);
+                }
             }
-            if (Active)
+            if (Active && Height >= Ui.S(26))
             {
                 using (Font af = Ui.F(7.5f, FontStyle.Bold))
                 using (SolidBrush ab = new SolidBrush(accent))
                     g.DrawString("当前", af, ab, Width - Ui.S(34), Ui.S(11));
             }
+        }
+
+        /// <summary>说明文字的矩形（OnPaint 和布局自检共用，免得两处各算一套）。</summary>
+        public Rectangle NoteRect()
+        {
+            return new Rectangle(Ui.S(28), Ui.S(32), Width - Ui.S(36), Math.Max(0, Height - Ui.S(36)));
+        }
+
+        /// <summary>完整说明放得下吗（自检用：设计尺寸及以上必须为 true，小窗口允许退化）。</summary>
+        public bool NoteFits()
+        {
+            Rectangle r = NoteRect();
+            return Ui.TextFits(Mode.Note, Ui.FontSmall, r.Width, r.Height);
+        }
+
+        string FirstNoteLine()
+        {
+            string n = Mode.Note ?? "";
+            int i = n.IndexOf('\n');
+            return i > 0 ? n.Substring(0, i) : n;
         }
     }
 
