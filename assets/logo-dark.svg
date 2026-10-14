@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 200" width="512" height="200" role="img" aria-label="LecooFan — N175L 风扇与 CPU 控制台 / Fan &amp; CPU console">
+  <title>LecooFan — N175L 风扇与 CPU 控制台（暗色）</title>
+  <defs>
+    <linearGradient id="lf-ring" x1="0.06" y1="0.94" x2="0.94" y2="0.06">
+      <stop offset="0" stop-color="#4084EB"/>
+      <stop offset="0.32" stop-color="#22A05E"/>
+      <stop offset="0.62" stop-color="#E0911E"/>
+      <stop offset="1" stop-color="#D64541"/>
+    </linearGradient>
+    <linearGradient id="lf-blade" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#8CB8F4"/>
+      <stop offset="0.55" stop-color="#4E8EEA"/>
+      <stop offset="1" stop-color="#2C63C9"/>
+    </linearGradient>
+    <radialGradient id="lf-bore" cx="0.36" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#4C5C72"/>
+      <stop offset="1" stop-color="#232E3C"/>
+    </radialGradient>
+    <radialGradient id="lf-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#4084EB" stop-opacity="0.22"/>
+      <stop offset="0.55" stop-color="#4084EB" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#4084EB" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="lf-soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="lf-fansoft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- soft ambient glow behind the mark -->
+  <circle cx="110" cy="100" r="96" fill="url(#lf-glow)"/>
+
+  <!-- gauge: tick marks (temperature scale), radial at 22.5° steps over the 270° sweep -->
+  <g stroke-linecap="round" fill="none">
+    <g stroke="#3C4A5C" stroke-width="3">
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(0 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(45 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(90 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(135 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(180 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(225 110 100)"/>
+      <line x1="57.67" y1="152.33" x2="49.90" y2="160.10" transform="rotate(270 110 100)"/>
+    </g>
+    <g stroke="#313D4C" stroke-width="1.8">
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(22.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(67.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(112.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(157.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(202.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(247.5 110 100)"/>
+      <line x1="56.61" y1="153.39" x2="52.02" y2="157.98" transform="rotate(292.5 110 100)"/>
+    </g>
+  </g>
+
+  <!-- gauge: the 270° temperature arc (cool → hot = the app's Good/Warn/Bad semantics) -->
+  <path d="M 63.33 146.67 A 66 66 0 1 1 156.67 146.67" fill="none" stroke="url(#lf-ring)"
+        stroke-width="11" stroke-linecap="round" filter="url(#lf-soft)"/>
+
+  <!-- fan: three swept turbine blades + machined hub. What makes it read as a fan and not a
+       flower petal is the asymmetry: the outer (trailing) edge bulges far out while the inner
+       (leading) edge is almost straight, so each blade leans into the rotation; the neck is
+       narrow and the roots tuck under the hub. -->
+  <g transform="translate(110,100) scale(1.04)" filter="url(#lf-fansoft)">
+    <g fill="url(#lf-blade)">
+      <path d="M -6 -10.4 C -8.2 -33 4.7 -44.8 20.2 -38 C 27.1 -34.7 31.4 -29.3 31.5 -24.6 C 22 -13.5 13 -11 6 -10.4 Z"/>
+      <path d="M -6 -10.4 C -8.2 -33 4.7 -44.8 20.2 -38 C 27.1 -34.7 31.4 -29.3 31.5 -24.6 C 22 -13.5 13 -11 6 -10.4 Z" transform="rotate(120)"/>
+      <path d="M -6 -10.4 C -8.2 -33 4.7 -44.8 20.2 -38 C 27.1 -34.7 31.4 -29.3 31.5 -24.6 C 22 -13.5 13 -11 6 -10.4 Z" transform="rotate(240)"/>
+    </g>
+    <!-- specular highlight along each blade's leading edge -->
+    <g fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="1.2" stroke-linecap="round">
+      <path d="M 6 -10.4 C 13 -11 22 -13.5 31.5 -24.6"/>
+      <path d="M 6 -10.4 C 13 -11 22 -13.5 31.5 -24.6" transform="rotate(120)"/>
+      <path d="M 6 -10.4 C 13 -11 22 -13.5 31.5 -24.6" transform="rotate(240)"/>
+    </g>
+    <circle r="12.4" fill="url(#lf-blade)" stroke="#2C63C9" stroke-opacity="0.4" stroke-width="1.1"/>
+    <circle r="4.3" fill="url(#lf-bore)"/>
+  </g>
+
+  <!-- wordmark -->
+  <g font-family="Inter, 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'Hiragino Sans GB', sans-serif">
+    <text x="212" y="97" font-size="52" font-weight="650" letter-spacing="0.4" fill="#EDF1F7">LecooFan</text>
+    <text x="214" y="130" font-size="19.5" font-weight="500" letter-spacing="0.2" fill="#A8B4C4">N175L 风扇与 CPU 控制台</text>
+    <text x="214" y="158" font-size="12" font-weight="600" letter-spacing="3.4" fill="#7C8899">QUIET · COOL · IN CONTROL</text>
+  </g>
+</svg>
