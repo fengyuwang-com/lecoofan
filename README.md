@@ -172,13 +172,15 @@ python restore_fan.py
 
 ## 📥 安装与卸载 / Install & Uninstall
 
-发到 GitHub Release 的包是 `LecooFan-Setup-1.0.0.zip`（约 120 KB），里面同时带编译好的 exe 和完整源码（AGPL 要求）。
+发到 GitHub Release 的安装包是 **`LecooFan-Setup-1.0.1.exe`**（引导安装器，内置全部安装文件，双击即装）；另附 `LecooFan-Setup-1.0.1.zip`（便携/源码形态，解压后跑 `install.bat`）。
 
 ### 安装 / Install
 
-1. 解压 zip 到任意位置（**整个目录一起解压**，不要把 `install.bat` / `Install-LecooFan.ps1` 单独拷出来——它们旁边必须有 exe）。
-2. 双击 `install.bat`。会弹一次 UAC（要写 Program Files 和注册表）。
-3. 完了托盘里就有图标了。安装器做的事：
+**方式 A（推荐）：下载 `LecooFan-Setup-1.0.1.exe`，双击运行。** 弹一次 UAC，约十几秒装完，托盘出现图标。静默安装：`LecooFan-Setup-1.0.1.exe --silent`（退出码 0 即成功，日志在 `%TEMP%\LecooFanSetup\install.log`）。
+
+**方式 B：zip 便携形态。** 解压 zip 到任意位置（**整个目录一起解压**，不要把 `install.bat` / `Install-LecooFan.ps1` 单独拷出来——它们旁边必须有 exe），双击 `install.bat`。
+
+两种方式装的东西完全一样：
 
 | 项 | 位置 |
 |----|------|
@@ -188,7 +190,7 @@ python restore_fan.py
 | 卸载入口 | `HKLM\...\Uninstall\LecooFan`（设置 → 应用 → 「LecooFan 风扇控制台」里可卸载） |
 | 开始菜单 | `所有用户\...\Programs\LecooFan\`：控制台快捷方式 + 卸载快捷方式 |
 
-升级重装直接再跑一次 `install.bat`：同名任务/启动项/卸载入口会被覆盖刷新，`lecoofan_gui.cfg`（你的模式、转速上限等配置）会保留。
+升级重装直接再跑一次安装包（exe 或 `install.bat` 都行）：同名任务/启动项/卸载入口会被覆盖刷新，`lecoofan_gui.cfg`（你的模式、转速上限等配置）会保留。
 
 前提条件（缺了也能装，但风扇控制不可用）：`C:\Program Files\LecooControlCenter\inpoutx64.dll`（EC 驱动，见上面依赖 [2]/[4]）。
 
@@ -205,12 +207,18 @@ python restore_fan.py
 ### 从源码自己打包 / Build the Package
 
 ```bash
-# 1. 编译两个 exe（命令见「图形控制台」的重编译一节）
-# 2. 打 zip：dist/LecooFan-Setup-1.0.0/（staging）+ LecooFan-Setup-1.0.0.zip
-powershell -File installer\build-package.ps1 -Version 1.0.0
+# 1. 编译 GUI / Tray 两个 exe（命令见「图形控制台」的重编译一节）
+# 2. 一键打包：staging + zip + 引导安装器 exe
+powershell -File installer\build-package.ps1 -Version 1.0.1
 ```
 
-`build-package.ps1` 还有个 `-WithSfx` 开关想生成 7-Zip 自解压 exe，**本机不可用**：7-Zip 26.02 的 SFX 模块完全不读内嵌配置（`InstallPath`/`RunProgram` 都被忽略，退化成"往当前目录解压并弹覆盖询问"），表现为运行后卡住不动。默认只出 zip，装法一样（解压 → install.bat）。
+`build-package.ps1` 产出三样：
+
+- `dist/LecooFan-Setup-<ver>/`（staging 目录，18 个文件）
+- `dist/LecooFan-Setup-<ver>.zip`（便携形态）
+- `dist/LecooFan-Setup-<ver>.exe`（★ 引导安装器）：把 staging 全部文件作为 `payload/…` 资源嵌进单个 exe（源码 `installer/lecoofan_setup.cs`，管理员清单 `installer/setup.manifest`），运行时解压到 `%TEMP%\LecooFanSetup` 并调用 `Install-LecooFan.ps1`。图标由 `installer/make_icon.cs` 生成（`installer/lecoofan.ico`，与托盘同款三叶徽标，多尺寸 DIB）。
+
+`-WithSfx` 是保留的旧实验（7-Zip 自解压：本机 7-Zip 26.02 读不到内嵌配置，不可用）——现在用引导安装器 exe 替代它。
 
 ---
 
@@ -813,7 +821,11 @@ C:\Projects\lecoofan\          # ★ 本项目的根目录
 │   ├── uninstall.bat                # 卸载入口（自提权；ARP 的卸载入口指向它）
 │   ├── Install-LecooFan.ps1         # 安装逻辑：拷文件+任务+启动项+ARP+快捷方式+启动
 │   ├── Uninstall-LecooFan.ps1       # 卸载逻辑：交还风扇→删任务/启动项/ARP/目录
-│   └── build-package.ps1            # 打包：staging + zip（-WithSfx 可选，本机不可用）
+│   ├── lecoofan_setup.cs            # ★ 引导安装器源码（单 exe，内嵌全部安装文件）
+│   ├── setup.manifest               # 安装器清单（requireAdministrator + DPI）
+│   ├── make_icon.cs                 # 图标生成工具（产出 lecoofan.ico）
+│   ├── lecoofan.ico                 # 安装器图标（三叶徽标，多尺寸 DIB）
+│   └── build-package.ps1            # 打包：staging + zip + 引导安装器 exe
 │
 ├── start_fan.bat                    # 双击启动（前台窗口）
 ├── stop_fan.bat                     # 双击恢复出厂（安全入口）
