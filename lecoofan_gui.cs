@@ -608,12 +608,14 @@ namespace LecooFanGui
     // ─────────────────────────────────────────────────────────────────────────
     class MainForm : Form
     {
+        // 模式说明写短一点：每行一条要点，2x2 模式格里两行放得下（格子宽 ~186 设计单位）。
+        // 详细说明（EPP/护栏数值、实验档边界）在底部「当前模式」行和「说明 / 边界」对话框里，不在这里重复。
         static readonly CpuMode[] Modes = new CpuMode[]
         {
-            new CpuMode("perf",  "高性能",   2,  0,  0, 1, 1, 1, "睿频开 + EPP 0 + 主动散热 + 风扇 EC 自动\n满载 87°C / ~4400 RPM，最吵但满血", FanPreset.Auto, 0),
-            new CpuMode("bal",   "平衡(原厂)", 2, 33, 50, 1, 0, 1, "出厂原始设置 + 风扇 EC 自动\n满载 84°C / ~3400 RPM", FanPreset.Auto, 0),
-            new CpuMode("quiet", "安静",     0, 60, 70, 0, 0, 1, "关睿频 + EPP 60/70 + 被动 + 风扇锁 2000 RPM\n满载约 64-66°C / ~1950 RPM（护栏 72°C 兜底）", FanPreset.Silent, 2000),
-            new CpuMode("deep",  "极静(实验)", 0, 80, 90, 0, 0, 0, "关 HWP 自主模式 + 风扇锁 1600 RPM\n实验档：1600 低于 EC 地板 ~1700，实坐地板，仅调试用", FanPreset.Silent, 1600),
+            new CpuMode("perf",  "高性能",   2,  0,  0, 1, 1, 1, "睿频开 · 风扇 EC 自动\n满载 87°C / ~4400 RPM", FanPreset.Auto, 0),
+            new CpuMode("bal",   "平衡(原厂)", 2, 33, 50, 1, 0, 1, "原厂设置 · 风扇 EC 自动\n满载 84°C / ~3400 RPM", FanPreset.Auto, 0),
+            new CpuMode("quiet", "安静",     0, 60, 70, 0, 0, 1, "关睿频 · 锁 2000 RPM\n满载 ~65°C / ~1950 RPM", FanPreset.Silent, 2000),
+            new CpuMode("deep",  "极静(实验)", 0, 80, 90, 0, 0, 0, "关 HWP · 锁 1600 RPM\n实验档，仅调试用", FanPreset.Silent, 1600),
         };
 
         static readonly string LogFile = System.IO.Path.Combine(Application.StartupPath, "lecoofan_gui.log");
@@ -687,6 +689,14 @@ namespace LecooFanGui
         static readonly int[] RpmCaps = { 1600, 1800, 2000, 2200, 2500, 3000 };
         TextBox txtLog;
         Button btnStress, btnSoak, btnFactory;
+        // 可缩放窗口：LayoutUi 要重排的控件都留引用（设计坐标仍写在 BuildUi 里，LayoutUi 按比例重算）
+        Card cardMode, cardFan, cardTune, cardMon, cardAct, cardSys;
+        Label lblEpp, lblCool, lblPwm, lblFanHint, lblSoakHint;
+        Button btnApply, btnHelp, btnDir, btnExit;
+        readonly List<Label> metricCaps = new List<Label>();
+        readonly List<Label> metricVals = new List<Label>();
+        bool layoutReady, pendingMaximize;
+        bool cliMode;                              // 自检模式：不读也不写用户配置
         Soak soak = new Soak();
         System.Windows.Forms.Timer uiTimer;
         NotifyIcon trayIcon;                       // 托盘模式（--tray / 开机自启动）用
@@ -706,6 +716,7 @@ namespace LecooFanGui
         /// <param name="cliMode">命令行自检/脚本模式：不读配置、不碰用户设置</param>
         public MainForm(bool cliMode)
         {
+            this.cliMode = cliMode;
             DpiScale = dpiScaleForTest > 0f ? dpiScaleForTest : ComputeDpiScale();
             // 测试模式：字号按“目标缩放 / 本机缩放”放大，等价于真的在目标 DPI 的屏上跑
             float fontScale = dpiScaleForTest > 0f ? DpiScale / ComputeDpiScale() : 1f;
@@ -714,7 +725,18 @@ namespace LecooFanGui
             BuildUi();
             ScaleTree(this, DpiScale, fontScale);
             Font = Ui.FontBase;
+            LayoutUi();                                // 按实际客户区摆一遍（设计尺寸下与 BuildUi 写的坐标一致）
+            layoutReady = true;                        // 之后的 Resize 事件才走 LayoutUi
             designSize = Size;                         // 此刻还是设计尺寸，托盘还原兜底用
+            if (!cliMode)
+            {
+                // 默认开成屏幕中间的小部件（≈ 屏幕面积 1/3，受内容下限钳制）。
+                // DefaultClientSize 给的是客户区，赋值给 Size 得把边框标题栏补回去 ——
+                // 少补这一下客户区就比下限矮一截，一打开就带滚动条（旧版的毛病）。
+                Size cs = DefaultClientSize();
+                Size = new Size(cs.Width + (Width - ClientSize.Width),
+                                cs.Height + (Height - ClientSize.Height));
+            }
 
             sampler = new Sampler(ec);
             sampler.Start();
@@ -872,6 +894,7 @@ namespace LecooFanGui
 
         void SaveSettings()
         {
+            if (cliMode) return;                    // --dumpui 等自检路径不许动用户配置
             if (radFanAuto == null) return;         // BuildUi 之前别写
             try
             {
@@ -887,6 +910,13 @@ namespace LecooFanGui
                 sb.AppendLine("epp=" + trkEpp.Value);
                 sb.AppendLine("turbo=" + (chkTurbo.Checked ? 1 : 0));
                 sb.AppendLine("cool=" + (cmbCool.SelectedIndex == 0 ? 1 : 0));
+                // 窗口大小也记住（托盘/最小化时用还原尺寸，不然下次开机会照搬那个尺寸）。
+                // 但「没动过窗口」不写：默认大小是跟屏幕算出来的，写死了换屏幕/换缩放就不自适应了
+                // （这条踩过一次：自检留下的 win= 让新默认尺寸失效，一打开就带滚动条）。
+                Size ws = WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size;
+                if (ws.Width > 0 && ws.Height > 0 && !IsDefaultWindowSize(ws))
+                    sb.AppendLine("win=" + ws.Width + "x" + ws.Height);
+                sb.AppendLine("max=" + (WindowState == FormWindowState.Maximized ? 1 : 0));
                 System.IO.File.WriteAllText(CfgFile, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -897,7 +927,7 @@ namespace LecooFanGui
             try
             {
                 if (!System.IO.File.Exists(CfgFile)) return;
-                string cpu = null, fan = null, cap = null, pwm = null, epp = null, turbo = null, cool = null;
+                string cpu = null, fan = null, cap = null, pwm = null, epp = null, turbo = null, cool = null, win = null, max = null;
                 foreach (string line in System.IO.File.ReadAllLines(CfgFile, Encoding.UTF8))
                 {
                     string[] kv = line.Split('=');
@@ -910,8 +940,24 @@ namespace LecooFanGui
                     else if (k == "epp") epp = v;
                     else if (k == "turbo") turbo = v;
                     else if (k == "cool") cool = v;
+                    else if (k == "win") win = v;
+                    else if (k == "max") max = v;
                 }
                 int n;
+
+                // 窗口大小/最大化（先夹到「最小尺寸 ~ 主屏工作区」，换屏或改分辨率后不会跑出屏幕）
+                if (win != null)
+                {
+                    string[] wh = win.Split('x');
+                    int w, h;
+                    if (wh.Length == 2 && int.TryParse(wh[0], out w) && int.TryParse(wh[1], out h))
+                    {
+                        Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+                        Size = new Size(Math.Max(MinimumSize.Width, Math.Min(w, wa.Width)),
+                                        Math.Max(MinimumSize.Height, Math.Min(h, wa.Height)));
+                    }
+                }
+                pendingMaximize = (max == "1");
 
                 // 微调区滑块的显示状态先恢复（只动 UI，不写电源方案）
                 if (epp != null && int.TryParse(epp, out n))
@@ -966,14 +1012,18 @@ namespace LecooFanGui
         void BuildUi()
         {
             Text = "LecooFan 控制台 — N175L CPU / 风扇调速";
-            ClientSize = new Size(860, 760);
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            ClientSize = new Size(860, 760);          // 设计尺寸：LayoutUi 以它为基准等比重算
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
             AutoScaleMode = AutoScaleMode.None;   // 缩放全部由 ScaleTree 手动做，关掉 WinForms 内置的那套
+            AutoScroll = true;                    // 缩到布局下限以下时出滚动条，绝不裁切内容
             StartPosition = FormStartPosition.CenterScreen;
             Font = Ui.FontBase;
             BackColor = Ui.WindowBg;
             ForeColor = Ui.Text;
+            // 窗口最小尺寸（含边框，所以补上边框厚度）：再小也能用，内容是滚动的
+            MinimumSize = new Size(S(560) + (Width - ClientSize.Width),
+                                   S(440) + (Height - ClientSize.Height));
 
             Label title = new Label();
             title.Text = "LecooFan 控制台";
@@ -989,7 +1039,7 @@ namespace LecooFanGui
             Controls.Add(lblSub);
 
             // ── CPU 模式（卡片式，点击立即生效）──
-            Card cardMode = new Card();
+            cardMode = new Card();
             cardMode.Text = "CPU 模式（点击立即生效）";
             cardMode.SetBounds(16, 56, 408, 212);
             Controls.Add(cardMode);
@@ -1011,12 +1061,12 @@ namespace LecooFanGui
             cardMode.Controls.Add(lblMode);
 
             // ── 微调 ──
-            Card cardTune = new Card();
+            cardTune = new Card();
             cardTune.Text = "微调（自定义）";
             cardTune.SetBounds(16, 456, 408, 168);
             Controls.Add(cardTune);
 
-            Label l1 = new Label(); l1.Text = "EPP"; l1.SetBounds(14, 30, 40, 16); l1.ForeColor = Ui.Muted; cardTune.Controls.Add(l1);
+            lblEpp = new Label(); lblEpp.Text = "EPP"; lblEpp.SetBounds(14, 30, 40, 16); lblEpp.ForeColor = Ui.Muted; cardTune.Controls.Add(lblEpp);
             trkEpp = new TrackBar();
             trkEpp.Minimum = 0; trkEpp.Maximum = 100; trkEpp.TickFrequency = 10;
             trkEpp.SetBounds(54, 24, 200, 45);
@@ -1029,14 +1079,14 @@ namespace LecooFanGui
             chkTurbo.ForeColor = Ui.Text;
             cardTune.Controls.Add(chkTurbo);
 
-            Label l2 = new Label(); l2.Text = "散热"; l2.SetBounds(180, 82, 40, 16); l2.ForeColor = Ui.Muted; cardTune.Controls.Add(l2);
+            lblCool = new Label(); lblCool.Text = "散热"; lblCool.SetBounds(180, 82, 40, 16); lblCool.ForeColor = Ui.Muted; cardTune.Controls.Add(lblCool);
             cmbCool = new ComboBox(); cmbCool.DropDownStyle = ComboBoxStyle.DropDownList;
             cmbCool.Items.Add("主动 (先转风扇)");
             cmbCool.Items.Add("被动 (先降频)");
             cmbCool.SetBounds(222, 78, 114, 24);
             cardTune.Controls.Add(cmbCool);
 
-            Button btnApply = new Button(); btnApply.Text = "应用微调"; btnApply.SetBounds(14, 112, 150, 30);
+            btnApply = new Button(); btnApply.Text = "应用微调"; btnApply.SetBounds(14, 112, 150, 30);
             Ui.StyleButton(btnApply, Ui.Accent);
             btnApply.Click += delegate { ApplyTune(); };
             cardTune.Controls.Add(btnApply);
@@ -1049,24 +1099,27 @@ namespace LecooFanGui
             cardTune.Controls.Add(lblTuneHint);
 
             // ── 风扇 ──
-            Card cardFan = new Card();
+            cardFan = new Card();
             cardFan.Text = "风扇控制";
             cardFan.SetBounds(16, 276, 408, 172);
             Controls.Add(cardFan);
 
-            radFanAuto = new RadioButton(); radFanAuto.Text = "EC 自动"; radFanAuto.SetBounds(14, 26, 74, 20); radFanAuto.Checked = true;
+            // 四个单选钮用 AutoSize（宽度按文字实测），坐标由 LayoutUi 顺排 ——
+            // 旧版写死 x=14/92/176/260 且宽 110，「静音上限」的框铺到 202 压住 x=176 的
+            // 「静音曲线」：圆点被盖掉、只剩"音曲线"三个字。宽度写死必然在别的 DPI/字体下复现。
+            radFanAuto = new RadioButton(); radFanAuto.Text = "EC 自动"; radFanAuto.AutoSize = true; radFanAuto.SetBounds(14, 26, 74, 20); radFanAuto.Checked = true;
             radFanAuto.ForeColor = Ui.Text;
             radFanAuto.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanAuto);
-            radFanSilent = new RadioButton(); radFanSilent.Text = "静音上限"; radFanSilent.SetBounds(92, 26, 110, 20);
+            radFanSilent = new RadioButton(); radFanSilent.Text = "静音上限"; radFanSilent.AutoSize = true; radFanSilent.SetBounds(92, 26, 110, 20);
             radFanSilent.ForeColor = Ui.Text;
             radFanSilent.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanSilent);
-            radFanCurve = new RadioButton(); radFanCurve.Text = "静音曲线"; radFanCurve.SetBounds(176, 26, 80, 20);
+            radFanCurve = new RadioButton(); radFanCurve.Text = "静音曲线"; radFanCurve.AutoSize = true; radFanCurve.SetBounds(176, 26, 80, 20);
             radFanCurve.ForeColor = Ui.Text;
             radFanCurve.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanCurve);
-            radFanManual = new RadioButton(); radFanManual.Text = "手动 PWM"; radFanManual.SetBounds(260, 26, 110, 20);
+            radFanManual = new RadioButton(); radFanManual.Text = "手动 PWM"; radFanManual.AutoSize = true; radFanManual.SetBounds(260, 26, 110, 20);
             radFanManual.ForeColor = Ui.Text;
             radFanManual.CheckedChanged += delegate { FanModeChanged(); };
             cardFan.Controls.Add(radFanManual);
@@ -1091,7 +1144,7 @@ namespace LecooFanGui
             lblFanState.Text = "状态: —";
             cardFan.Controls.Add(lblFanState);
 
-            Label l3 = new Label(); l3.Text = "PWM"; l3.SetBounds(14, 100, 40, 16); l3.ForeColor = Ui.Muted; cardFan.Controls.Add(l3);
+            lblPwm = new Label(); lblPwm.Text = "PWM"; lblPwm.SetBounds(14, 100, 40, 16); lblPwm.ForeColor = Ui.Muted; cardFan.Controls.Add(lblPwm);
             trkPwm = new TrackBar();
             trkPwm.Minimum = Sampler.PWM_MIN; trkPwm.Maximum = Sampler.PWM_MAX;
             trkPwm.Value = 0x30; trkPwm.TickFrequency = 8; trkPwm.SetBounds(54, 96, 220, 38);
@@ -1105,16 +1158,16 @@ namespace LecooFanGui
             lblPwmVal.Text = "0x30";
             cardFan.Controls.Add(lblPwmVal);
 
-            Label l4 = new Label();
-            l4.SetBounds(14, 138, 380, 32);
-            l4.ForeColor = Ui.Warn;
-            l4.Font = Ui.FontSmall;
-            l4.Text = "静音上限：锁住转速（EC 下限 ~1700 RPM，比这更低锁不住）\n" +
-                      "护栏 72°C 超温自动放开转速；关窗口 = 退回托盘继续跑";
-            cardFan.Controls.Add(l4);
+            lblFanHint = new Label();
+            lblFanHint.SetBounds(14, 138, 380, 32);
+            lblFanHint.ForeColor = Ui.Warn;
+            lblFanHint.Font = Ui.FontSmall;
+            lblFanHint.Text = "静音上限：锁住转速（EC 下限 ~1700 RPM，比这更低锁不住）\n" +
+                      "护栏 72°C 自动放开转速；关窗口 = 交还 EC 退出";
+            cardFan.Controls.Add(lblFanHint);
 
             // ── 实时监控（大号读数 + 趋势图）──
-            Card cardMon = new Card();
+            cardMon = new Card();
             cardMon.Text = "实时监控";
             cardMon.SetBounds(436, 56, 408, 300);
             Controls.Add(cardMon);
@@ -1134,10 +1187,11 @@ namespace LecooFanGui
             lblFreqNote.SetBounds(14, 276, 380, 15);
             lblFreqNote.ForeColor = Ui.Muted;
             lblFreqNote.Font = Ui.FontSmall;
+            lblFreqNote.AutoEllipsis = true;      // 文字是运行期填的，一行放不下就省略号，别撑破卡片
             cardMon.Controls.Add(lblFreqNote);
 
             // ── 系统设置回读条 ──
-            Card cardSys = new Card();
+            cardSys = new Card();
             cardSys.Text = "系统设置回读";
             cardSys.SetBounds(16, 632, 828, 64);
             Controls.Add(cardSys);
@@ -1148,7 +1202,7 @@ namespace LecooFanGui
             cardSys.Controls.Add(valSys);
 
             // ── 操作 / 测试 ──
-            Card cardAct = new Card();
+            cardAct = new Card();
             cardAct.Text = "操作 / 测试";
             cardAct.SetBounds(436, 364, 408, 252);
             Controls.Add(cardAct);
@@ -1184,14 +1238,14 @@ namespace LecooFanGui
             btnFactory.Click += delegate { ApplyMode(Modes[1]); };
             cardAct.Controls.Add(btnFactory);
 
-            Button btnHelp = new Button();
+            btnHelp = new Button();
             btnHelp.Text = "说明 / 边界";
             btnHelp.SetBounds(204, 78, 190, 34);
             Ui.StyleButton(btnHelp, Ui.Muted);
             btnHelp.Click += delegate { ShowHelp(); };
             cardAct.Controls.Add(btnHelp);
 
-            Button btnDir = new Button();
+            btnDir = new Button();
             btnDir.Text = "打开项目目录";
             btnDir.SetBounds(14, 122, 180, 34);
             Ui.StyleButton(btnDir, Ui.Muted);
@@ -1201,14 +1255,14 @@ namespace LecooFanGui
             };
             cardAct.Controls.Add(btnDir);
 
-            Button btnExit = new Button();
+            btnExit = new Button();
             btnExit.Text = "退出（并交还风扇）";
             btnExit.SetBounds(204, 122, 190, 34);
             Ui.StyleButton(btnExit, Ui.Bad);
             btnExit.Click += delegate { Close(); };
             cardAct.Controls.Add(btnExit);
 
-            Label lblSoakHint = new Label();
+            lblSoakHint = new Label();
             lblSoakHint.SetBounds(14, 166, 380, 44);
             lblSoakHint.ForeColor = Ui.Muted;
             lblSoakHint.Font = Ui.FontSmall;
@@ -1250,7 +1304,271 @@ namespace LecooFanGui
             val.SetBounds(x, y + 14, w, (int)(size * 2.3F));
             val.Text = "—";
             parent.Controls.Add(val);
+            // 记下来：窗口缩放时按「左列/右列」两栏重新分配宽度（LayoutMonCard）
+            metricCaps.Add(cap);
+            metricVals.Add(val);
             return val;
+        }
+
+        // ── 可缩放窗口：布局按当前客户区重算 ──
+        // 设计尺寸 860x760 下，下面每条公式都精确还原 BuildUi 里写的坐标（注释里就是验算）；
+        // 放大：两列平分横向增量，纵向增量按设计比例分给卡片（日志最多吃 1/4 增量），底部两张卡钉在底边；
+        // 缩小：每张卡有自己的内容下限，先保底再把余量按比例分；缩到布局下限为止，再小交给窗体滚动条
+        // —— 任何尺寸都不裁切、不重叠，放不下的小字提示直接隐藏（不硬塞、不切字）。
+
+        const int DESIGN_W = 860, DESIGN_H = 760;
+        // 设计高度（左列 mode/fan/tune 与右列 mon/act）：
+        //   风扇卡从 172 提到 184 —— 原生 TrackBar 有最小高度（175% 下 80px ≈ 46 设计单位，
+        //   比设计写的 38 大），172 会让 PWM 滑块压住底部提示条；
+        //   模式卡 200→208 —— 2x2 模式格的说明是两行，格子高到 67 设计单位才放得下，
+        //   差值从微调卡匀出来（168→160，它的下限只有 145），三张卡合计仍是 552，窗口设计尺寸不变。
+        const int DESIGN_MODE_H = 208, DESIGN_FAN_H = 184, DESIGN_TUNE_H = 160;
+        const int DESIGN_MON_H = 300, DESIGN_ACT_H = 252;
+        // 布局下限（设计单位）：再小就滚动，不再压缩内容。667 是左列三卡下限 + 缝 + 底部两卡的合计
+        // （130+184+145+16 缝 +56 标题 +8 +64 回读 +10 +48 日志 +6 = 667），
+        // 700 留 33 设计单位余量 —— 那点余量正好让模式格在默认窗口下也放得下两行说明。
+        const int FLOOR_W = 750, FLOOR_H = 700;
+        // 各卡内容下限（设计单位）：低于这个高度内容就得重叠，所以由 FlexHeights 保底
+        const int MIN_MODE_H = 130, MIN_FAN_H = 184, MIN_TUNE_H = 145;
+        const int MIN_MON_H = 200, MIN_ACT_H = 200;    // 操作卡 200：三排按钮 156 + 底部结果行 38 不打架
+
+        void LayoutUi()
+        {
+            int W = Math.Max(ClientSize.Width, S(FLOOR_W));
+            int H = Math.Max(ClientSize.Height, S(FLOOR_H));
+            AutoScrollMinSize = new Size(W, H);
+
+            int margin = S(16), gap = S(8), topY = S(56);
+
+            // 横向：左列 408、右列 408、中间 12，窗口变宽两列平分
+            int leftW = S(408) + (W - S(DESIGN_W)) / 2;
+            int rightX = margin + leftW + S(12);
+            int rightW = W - margin - rightX;
+
+            // 单选钮先顺排（一行放不下会换行），换行后风扇卡要多占高度
+            int fanDy = LayoutFanRadios(leftW);
+
+            // 纵向：日志框贴底（窗口变高最多分它 1/4 增量），系统回读卡压在日志上面
+            int logH = S(48) + Math.Max(0, H - S(DESIGN_H)) / 4;
+            int logY = H - S(6) - logH;
+            int sysY = logY - S(10) - S(64);
+
+            // 两列的高度预算（设计：左列底 624 / 右列底 616，各自离回读卡 8 / 16）
+            int lSpace = (sysY - S(8)) - topY - gap * 2;    // 三张卡 + 两道缝
+            int rSpace = (sysY - S(16)) - topY - gap;       // 两张卡 + 一道缝
+
+            int[] lh = FlexHeights(lSpace,
+                new int[] { S(DESIGN_MODE_H), S(DESIGN_FAN_H), S(DESIGN_TUNE_H) },
+                new int[] { S(MIN_MODE_H), S(MIN_FAN_H) + fanDy, S(MIN_TUNE_H) });
+            int[] rh = FlexHeights(rSpace,
+                new int[] { S(DESIGN_MON_H), S(DESIGN_ACT_H) },
+                new int[] { S(MIN_MON_H), S(MIN_ACT_H) });
+            int modeH = lh[0], fanH = lh[1], tuneH = lh[2], monH = rh[0], actH = rh[1];
+
+            int y = topY;
+            cardMode.SetBounds(margin, y, leftW, modeH); y = cardMode.Bottom + gap;
+            cardFan.SetBounds(margin, y, leftW, fanH);   y = cardFan.Bottom + gap;
+            cardTune.SetBounds(margin, y, leftW, tuneH);
+            y = topY;
+            cardMon.SetBounds(rightX, y, rightW, monH);  y = cardMon.Bottom + gap;
+            cardAct.SetBounds(rightX, y, rightW, actH);
+            cardSys.SetBounds(margin, sysY, W - margin * 2, S(64));
+            txtLog.SetBounds(S(24), logY, W - S(48), logH);
+            lblSub.SetBounds(S(18), S(36), W - S(36), S(16));
+
+            LayoutModeCard();
+            LayoutFanCard(fanDy);
+            LayoutTuneCard();
+            LayoutMonCard();
+            LayoutActCard();
+            valSys.SetBounds(S(14), S(26), cardSys.ClientSize.Width - S(28), S(34));
+        }
+
+        /// <summary>
+        /// 按设计高度比例分配 total，但每张卡不低于内容下限：不够的卡先抬到下限，
+        /// 余量再按设计比例分给其余的（迭代到稳定）。调用方保证 total ≥ 各下限之和。
+        /// </summary>
+        static int[] FlexHeights(int total, int[] design, int[] min)
+        {
+            int n = design.Length;
+            int[] h = new int[n];
+            bool[] fixedMin = new bool[n];
+            for (int pass = 0; pass < 4; pass++)
+            {
+                int free = total, dsum = 0;
+                for (int i = 0; i < n; i++)
+                    if (fixedMin[i]) free -= h[i]; else dsum += design[i];
+                bool changed = false;
+                for (int i = 0; i < n; i++)
+                {
+                    if (fixedMin[i]) continue;
+                    h[i] = dsum > 0 ? free * design[i] / dsum : 0;
+                    if (h[i] < min[i]) { h[i] = min[i]; fixedMin[i] = true; changed = true; }
+                }
+                if (!changed) break;
+            }
+            return h;
+        }
+
+        /// <summary>
+        /// 默认窗口大小（客户区）：屏幕工作区面积的 1/3，保持设计宽高比 —— 开出来就是屏幕中间一个小部件
+        /// （本机 2560x1516 工作区 → 1386x1225 设备像素，占 43.8% 面积，居中）。
+        /// 下限是紧凑下限（比它再小就该出滚动条了），上限是设计尺寸 —— 内容摆不下时以摆得下为准，
+        /// 所以是「≈1/3」而不是精确 1/3；用户拖过窗口尺寸后配置里的 win= 优先，这里只负责第一次打开。
+        /// </summary>
+        Size DefaultClientSize()
+        {
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;        // 设备像素（manifest 声明了 dpiAware）
+            double k = Math.Sqrt((double)wa.Width * wa.Height / 3.0 / ((double)S(DESIGN_W) * S(DESIGN_H)));
+            k = Math.Max(k, Math.Max((double)S(FLOOR_W) / S(DESIGN_W), (double)S(FLOOR_H) / S(DESIGN_H)));
+            k = Math.Min(k, 1.0);
+            return new Size((int)Math.Round(S(DESIGN_W) * k), (int)Math.Round(S(DESIGN_H) * k));
+        }
+
+        /// <summary>当前外框尺寸就是「默认开窗尺寸」吗（差 4px 以内算没动过，写配置时用来跳过 win=）。</summary>
+        bool IsDefaultWindowSize(Size outer)
+        {
+            Size cs = DefaultClientSize();
+            Size def = new Size(cs.Width + (Width - ClientSize.Width),
+                                cs.Height + (Height - ClientSize.Height));
+            return Math.Abs(outer.Width - def.Width) <= 4 && Math.Abs(outer.Height - def.Height) <= 4;
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (layoutReady) LayoutUi();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // 上次退出时是最大化就还原（托盘模式不弹窗口，别去抢前台）
+            if (pendingMaximize && !trayMode) WindowState = FormWindowState.Maximized;
+        }
+
+        /// <summary>
+        /// 风扇卡四个单选钮：按实测文字宽度顺排，一行放不下自动换行。返回换行多占的高度。
+        /// 宽度写死是「静音曲线」被前一个按钮压住的根因（见 BuildUi 里的说明）。
+        /// </summary>
+        int LayoutFanRadios(int cardW)
+        {
+            RadioButton[] rads = { radFanAuto, radFanSilent, radFanCurve, radFanManual };
+            int x = S(14), y = S(26), maxX = cardW - S(14);
+            foreach (RadioButton r in rads)
+            {
+                Size ps = r.PreferredSize;
+                if (x > S(14) && x + ps.Width > maxX) { x = S(14); y += S(24); }
+                r.SetBounds(x, y, ps.Width, ps.Height);
+                x += ps.Width + S(12);
+            }
+            return y - S(26);
+        }
+
+        /// <summary>
+        /// 多行提示条放不放得下（按实测文字高度）：放不下就整条隐藏，宁可少一条提示也不切字。
+        /// 注意 LayoutUi 在窗体 Show 之前就会跑，那时控件的 Visible 读出来恒为 false，
+        /// 所以判断结果必须用返回值，不能回头去读控件属性。
+        /// </summary>
+        static bool HintFits(Label l, int w, int h)
+        {
+            if (w < 40 || h < 20) return false;
+            return Ui.TextFits(l.Text, l.Font, w, h);   // 和模式卡说明、布局自检同一把尺子
+        }
+
+        /// <summary>CPU 模式卡：2x2 模式格 + 底部当前模式说明（卡片太矮就把说明藏了，模式格吃掉全部高度）。</summary>
+        void LayoutModeCard()
+        {
+            int cw = cardMode.ClientSize.Width, ch = cardMode.ClientSize.Height;
+            int cwEach = (cw - S(26) - S(10)) / 2;                    // 内边距 14/12 + 中缝 10 → 设计 186
+            bool showLbl = ch >= S(140);                              // 设计 200：说明留 36
+            int lblY = showLbl ? ch - S(36) : ch;                     // 设计 164
+            int chEach = Math.Max((lblY - S(4) - S(32) - S(8)) / 2, S(30));   // 设计 66；30 是一行标题的下限
+            for (int i = 0; i < modeCards.Length; i++)
+                modeCards[i].SetBounds(S(14) + (i % 2) * (cwEach + S(10)),
+                                       S(32) + (i / 2) * (chEach + S(8)), cwEach, chEach);
+            lblMode.Visible = showLbl;
+            if (showLbl) lblMode.SetBounds(S(14), lblY, cw - S(28), S(32));
+        }
+
+        /// <summary>风扇卡：单选钮（外部已排好）+ 转速上限 + PWM 滑块 + 底部提示。</summary>
+        void LayoutFanCard(int dy)
+        {
+            int cw = cardFan.ClientSize.Width, ch = cardFan.ClientSize.Height;
+            lblFanState.SetBounds(S(14), S(48) + dy, cw - S(28), S(26));
+            lblRpmCap.SetBounds(S(14), S(80) + dy, S(58), S(16));
+            cmbRpmCap.SetBounds(S(76), S(76) + dy, S(100), S(22));
+            lblPwm.SetBounds(S(14), S(100) + dy, S(40), S(16));
+            lblPwmVal.SetBounds(cw - S(126), S(100) + dy, S(60), S(16));          // 设计 282
+            trkPwm.SetBounds(S(54), S(96) + dy, lblPwmVal.Left - S(8) - S(54), S(38));  // 设计 220
+            // 原生 TrackBar 比请求的高（本机 175% 下 80px），提示条要排在它下面，不然被压住
+            int hintY = Math.Max(trkPwm.Bottom + S(4), ch - S(38));
+            int hintH = ch - hintY - S(4);
+            bool showHint = HintFits(lblFanHint, cw - S(28), hintH);
+            lblFanHint.Visible = showHint;
+            if (showHint) lblFanHint.SetBounds(S(14), hintY, cw - S(28), hintH);
+        }
+
+        /// <summary>微调卡：EPP 滑块拉长，底部说明随卡片高度伸展（放不下就藏掉说明）。</summary>
+        void LayoutTuneCard()
+        {
+            int cw = cardTune.ClientSize.Width, ch = cardTune.ClientSize.Height;
+            lblEpp.SetBounds(S(14), S(30), S(40), S(16));
+            lblEppVal.SetBounds(cw - S(148), S(30), S(50), S(16));                // 设计 260
+            trkEpp.SetBounds(S(54), S(24), lblEppVal.Left - S(8) - S(54), S(45));
+            chkTurbo.SetBounds(S(14), S(80), S(150), S(20));
+            lblCool.SetBounds(S(180), S(82), S(40), S(16));
+            cmbCool.SetBounds(S(222), S(78), S(114), S(24));
+            btnApply.SetBounds(S(14), S(112), S(150), S(30));
+            int hintW = cw - S(188), hintH = ch - S(116);                         // 设计 226x52
+            bool showHint = HintFits(lblTuneHint, hintW, hintH);
+            lblTuneHint.Visible = showHint;
+            if (showHint) lblTuneHint.SetBounds(S(174), S(110), hintW, hintH);
+        }
+
+        /// <summary>实时监控卡：读数两栏平分宽度，趋势图吃掉全部纵向余量（太矮就藏趋势图和脚注）。</summary>
+        void LayoutMonCard()
+        {
+            int cw = cardMon.ClientSize.Width, ch = cardMon.ClientSize.Height;
+            int dx = cw - S(408);
+            for (int i = 0; i < metricCaps.Count; i++)
+            {
+                int col = i % 2, row = i / 2;
+                // 两栏平分横向增量（设计 14 / 204）：增量只给右栏的话，窄窗口下右栏会压住左栏
+                int x = col == 0 ? S(14) : S(204) + dx / 2;
+                int w = col == 0 ? S(180) + dx / 2 : cw - S(14) - x;
+                int y = row == 0 ? S(30) : (row == 1 ? S(100) : S(146));
+                metricCaps[i].SetBounds(x, y, w, S(15));
+                metricVals[i].SetBounds(x, y + S(14), w, metricVals[i].Height);
+            }
+            bool showNote = ch >= S(236);                                         // 设计 276
+            lblFreqNote.Visible = showNote;
+            if (showNote) lblFreqNote.SetBounds(S(14), ch - S(24), cw - S(28), S(15));
+            bool showSpark = ch >= S(248);                                        // 设计 76 高，窗口变高就长高
+            spark.Visible = showSpark;
+            if (showSpark) spark.SetBounds(S(14), S(200), cw - S(28), ch - S(224));
+        }
+
+        /// <summary>操作卡：按钮两列贴边对齐，窄窗口下左边的按钮自动收窄（放不下就藏长跑说明）。</summary>
+        void LayoutActCard()
+        {
+            int cw = cardAct.ClientSize.Width, ch = cardAct.ClientSize.Height;
+            int x2 = cw - S(14) - S(94);                                          // 设计 300
+            int x1 = x2 - S(8) - S(88);                                           // 设计 204
+            btnSoak.SetBounds(x2, S(30), S(94), S(36));
+            cmbSoakLen.SetBounds(x1, S(34), S(88), S(26));
+            btnStress.SetBounds(S(14), S(30), x1 - S(10) - S(14), S(36));          // 设计 180
+            btnHelp.SetBounds(x1, S(78), cw - S(14) - x1, S(34));                  // 设计 190
+            btnFactory.SetBounds(S(14), S(78), x1 - S(10) - S(14), S(34));
+            btnExit.SetBounds(x1, S(122), btnHelp.Width, S(34));
+            btnDir.SetBounds(S(14), S(122), x1 - S(10) - S(14), S(34));
+            // 说明排在三排按钮下面、最后一行长跑结果上面，中间的空隙放不下就整条隐藏
+            int hintTop = btnDir.Bottom + S(4);
+            int hintAvail = (ch - S(38)) - hintTop - S(4);
+            bool showHint = HintFits(lblSoakHint, cw - S(28), hintAvail);
+            lblSoakHint.Visible = showHint;
+            if (showHint) lblSoakHint.SetBounds(S(14), hintTop, cw - S(28), hintAvail);
+            lblSoakLast.SetBounds(S(14), ch - S(38), cw - S(28), S(32));           // 设计 214：贴底
         }
 
         void DetectDaemon()
@@ -1775,12 +2093,22 @@ namespace LecooFanGui
                 string name = (c.Text != null && c.Text.Length > 0) ? c.Text : c.GetType().Name;
                 if (name.Length > 28) name = name.Substring(0, 28);
                 name = name.Replace("\r", " ").Replace("\n", " | ");
-                sb.AppendLine(string.Format("{0}{1,-14} x={2,4} y={3,4} w={4,4} h={5,3}{6}  {7}",
+                sb.AppendLine(string.Format("{0}{1,-14} x={2,4} y={3,4} w={4,4} h={5,3}{6}  {7}{8}",
                     new string(' ', depth * 2), c.GetType().Name, c.Left, c.Top, c.Width, c.Height,
-                    c.Font != null ? string.Format(" {0:0.#}pt", c.Font.SizeInPoints) : "", name));
-                if (c.Left < 0 || c.Top < 0 || c.Right > parent.ClientSize.Width || c.Bottom > parent.ClientSize.Height)
+                    c.Font != null ? string.Format(" {0:0.#}pt", c.Font.SizeInPoints) : "", name,
+                    c.Visible ? "" : "   (隐藏)"));
+                // 隐藏的控件坐标是上一轮的，别拿它算溢出/重叠（布局按尺寸主动隐藏提示条是正常行为）
+                if (!c.Visible) continue;
+                // 窗体开了 AutoScroll 时，内容按「布局尺寸」摆（可以比客户区大，超出部分滚动可见），
+                // 所以根窗体拿 AutoScrollMinSize 当边界，否则会把滚动条兜底当成溢出误报
+                Size psz = parent.ClientSize;
+                Form pf = parent as Form;
+                if (parent == root && pf != null && pf.AutoScroll)
+                    psz = new Size(Math.Max(psz.Width, pf.AutoScrollMinSize.Width),
+                                   Math.Max(psz.Height, pf.AutoScrollMinSize.Height));
+                if (c.Left < 0 || c.Top < 0 || c.Right > psz.Width || c.Bottom > psz.Height)
                 {
-                    sb.AppendLine(string.Format("    !! 超出父容器: {0} (父 {1}) 子底={2}", name, parent.ClientSize, c.Bottom));
+                    sb.AppendLine(string.Format("    !! 超出父容器: {0} (父 {1}) 子底={2}", name, psz, c.Bottom));
                     problems++;
                 }
                 // 文字放不下检查（Label 允许换行，按钮/单选框按单行算）
@@ -1800,19 +2128,27 @@ namespace LecooFanGui
                 }
                 if (c.Controls.Count > 0) DumpTree(root, c, depth + 1, sb, ref problems);
             }
-            if (depth <= 1)
-            {
-                List<Control> boxes = new List<Control>();
-                foreach (Control c in parent.Controls) if (c.Controls.Count > 0 || c is TextBox) boxes.Add(c);
-                for (int i = 0; i < boxes.Count; i++)
-                    for (int j = i + 1; j < boxes.Count; j++)
-                        if (boxes[i].Bounds.IntersectsWith(boxes[j].Bounds))
-                        {
-                            sb.AppendLine(string.Format("    !! 重叠: [{0}] 与 [{1}]",
-                                boxes[i].GetType().Name + ":" + boxes[i].Text, boxes[j].GetType().Name + ":" + boxes[j].Text));
-                            problems++;
-                        }
-            }
+            // 同级重叠检查：不止第一层，卡片内部也查 ——
+            // 「静音曲线」被前一个单选钮的框压住就是这么漏掉的（旧版只查第一层，
+            // 而卡片内部是 Label/RadioButton，谁都不是容器）。
+            // 容忍 2px：相邻控件的框经常是「刚好贴着」，压到 3px 以上才算真重叠。
+            List<Control> sibs = new List<Control>();
+            foreach (Control c in parent.Controls) if (c.Visible) sibs.Add(c);
+            for (int i = 0; i < sibs.Count; i++)
+                for (int j = i + 1; j < sibs.Count; j++)
+                {
+                    Rectangle a = sibs[i].Bounds, b = sibs[j].Bounds;
+                    a.Inflate(-2, -2); b.Inflate(-2, -2);
+                    Rectangle hit = Rectangle.Intersect(a, b);
+                    if (hit.Width >= 3 && hit.Height >= 3)
+                    {
+                        string n1 = (sibs[i].Text != null && sibs[i].Text.Length > 0) ? sibs[i].Text : sibs[i].GetType().Name;
+                        string n2 = (sibs[j].Text != null && sibs[j].Text.Length > 0) ? sibs[j].Text : sibs[j].GetType().Name;
+                        sb.AppendLine(string.Format("    !! 同级重叠: [{0}] 与 [{1}] 压住 {2}x{3}px",
+                            n1.Replace("\n", " "), n2.Replace("\n", " "), hit.Width, hit.Height));
+                        problems++;
+                    }
+                }
         }
 
         /// <summary>PowerShell 单引号字符串字面量：路径里的单引号翻倍转义。</summary>
@@ -1951,14 +2287,36 @@ namespace LecooFanGui
                     MainForm f = new MainForm(true);
                     f.Show();
                     Application.DoEvents();
-                    sb.AppendLine(string.Format("form client={0}x{1} scale={2:0.##}", f.ClientSize.Width, f.ClientSize.Height, DpiScale));
-                    if (dpiScaleForTest > 0f && dpiScaleForTest < ComputeDpiScale())
+                    // 四种尺寸都要过：设计尺寸、紧凑下限（默认开出来的大小）、放大（近似最大化）、
+                    // 最小窗口（此时内容按下限布局 + 滚动条）—— 每个尺寸都不重叠/不切字才算布局过关
+                    int[] ws = { DESIGN_W, FLOOR_W, 1500, 560 }, hs = { DESIGN_H, FLOOR_H, 1000, 440 };
+                    string[] names = { "设计尺寸", "紧凑下限(默认大小)", "放大", "最小窗口(滚动)" };
+                    sb.AppendLine(string.Format("屏幕工作区 {0}  设计 {1}x{2}  紧凑下限 {3}x{4}  默认开窗 {5}",
+                        Screen.PrimaryScreen.WorkingArea, S(DESIGN_W), S(DESIGN_H),
+                        S(FLOOR_W), S(FLOOR_H), f.DefaultClientSize()));
+                    for (int i = 0; i < ws.Length; i++)
                     {
-                        sb.AppendLine("注意: 模拟缩放低于本机真实 DPI 时，原生控件（TrackBar 最小高度随 DPI 走）与字号测量仍按真实 DPI，");
-                        sb.AppendLine("      可能报少量 1-2px 的假溢出；只看『超出父容器』里超过 3px 的项即可。");
+                        // 目标尺寸直接设 ClientSize：高 DPI 下 AutoScroll 会预留一条滚动条宽度
+                        // （本机 30px，等于 S(17)），实际客户区会比目标大一点 —— 所以下面按「实际客户区」测，
+                        // 别按 ws/hs 想象。反正低于下限的尺寸布局都按下限算，多这 30px 不影响覆盖。
+                        f.ClientSize = new Size(S(ws[i]), S(hs[i]));
+                        Application.DoEvents();
+                        sb.AppendLine(string.Format("── {0} {1}x{2}（实际客户区 {3}x{4}）scale={5:0.##}",
+                            names[i], ws[i], hs[i], f.ClientSize.Width, f.ClientSize.Height, DpiScale));
+                        problems = 0;
+                        DumpTree(f, f, 0, sb, ref problems);
+                        // 模式卡的说明是自绘的（DumpTree 看不到），这里单独查：设计尺寸及以上必须完整显示，
+                        // 小窗口允许退化成一行/隐藏 —— 退化是设计好的，静默切字不是。
+                        if (i == 0 || i == 2)
+                            foreach (ModeCard mc in f.modeCards)
+                                if (mc != null && !mc.NoteFits())
+                                {
+                                    sb.AppendLine(string.Format("  [问题] 模式卡「{0}」说明放不下（格子 {1}x{2}）",
+                                        mc.Mode.Label, mc.Width, mc.Height));
+                                    problems++;
+                                }
+                        sb.AppendLine(problems == 0 ? "LAYOUT: PASS (无重叠/无溢出)" : "LAYOUT: FAIL (" + problems + " 处问题)");
                     }
-                    DumpTree(f, f, 0, sb, ref problems);
-                    sb.AppendLine(problems == 0 ? "LAYOUT: PASS (无重叠/无溢出)" : "LAYOUT: FAIL (" + problems + " 处问题)");
                     f.Close();
                 }
                 else if (cmd == "--fan-cap" && args.Length >= 2)
