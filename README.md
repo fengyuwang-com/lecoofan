@@ -720,6 +720,18 @@ Error: "inpoutx64 driver not loaded"
       以管理员身份运行
 ```
 
+### 开机后短暂显示「驱动未就绪」/ Cold-Start Retry at Logon
+
+```
+现象：开机自启动后状态栏短暂显示「inpout 驱动未就绪（自动重试中…）」，
+      几秒内自动变成「已连接 (IT5570 @ 0x4E)」，无需任何操作。
+原因：开机十几秒内 inpoutx64 内核驱动可能尚未加载，程序会先主动启动驱动服务，
+      并每隔约 2 秒自动补连，直到成功（v1.0.1 起）。
+若超过 30 秒仍不连接：
+  1. 手动启动驱动服务，然后重启程序：sc start inpoutx64
+  2. 检查计划任务是否以最高权限运行：schtasks /Query /TN LecooFan /V
+```
+
 ### ThrottleStop 降压不生效 / Undervolt Not Working
 
 ```

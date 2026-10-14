@@ -145,22 +145,135 @@ namespace LecooFanGui
         public bool Available;
         public string Status = "未连接";
         const int PORT = 0x4E;
+        bool dllBroken;
 
         public Ec()
         {
+            // 冷启动时不能先碰 DLL：inpoutx64 的首次打开一旦失败（驱动服务尚未加载），
+            // 本进程内再也不会恢复——实测 20 秒内一直返回失败；而先用 SCM 把驱动服务
+            // 拉起来再打开，第一次就成功（0 秒）。所以顺序必须是"先起服务，再开驱动"。
+            // 2026-10-14 用户报的"开机自启动说未获取管理员权限"就是这个：登录后十几秒
+            // 驱动还没加载，旧代码只试一次就永久放弃。这里重试几轮，之后由 UI 定时器补连。
+            for (int i = 0; i < 4; i++)
+            {
+                if (TryOpen()) return;
+                if (dllBroken) return;                 // DLL 本身加载不了，重试无意义
+                if (i < 3) System.Threading.Thread.Sleep(500);
+            }
+        }
+
+        /// <summary>尝试（重新）打开 EC 驱动。返回是否可用。</summary>
+        public bool TryOpen()
+        {
             try
             {
-                if (IsInpOutDriverOpen() == 0)
+                // 先确保驱动服务在运行。inpoutx64 首开失败后本进程内不会恢复（实测），
+                // 所以服务明确起不来时干脆先不碰 DLL，把重试的机会留给后面。
+                SvcState svc = EnsureDriverService();
+                if (svc == SvcState.Stopped)
                 {
-                    Status = "inpout 驱动未加载 (需要管理员)";
-                    return;
+                    Available = false;
+                    Status = Elevated()
+                        ? "inpout 驱动未就绪（自动重试中…）"
+                        : "inpout 驱动未加载（需要管理员权限）";
+                    return false;
                 }
-                Available = true;
-                Status = "已连接 (IT5570 @ 0x4E)";
+                if (IsInpOutDriverOpen() != 0)
+                {
+                    Available = true;
+                    Status = "已连接 (IT5570 @ 0x4E)";
+                    return true;
+                }
+                Available = false;
+                Status = Elevated()
+                    ? "inpout 驱动未就绪（自动重试中…）"
+                    : "inpout 驱动未加载（需要管理员权限）";
             }
             catch (Exception ex)
             {
+                Available = false;
+                dllBroken = true;
                 Status = "加载 inpoutx64.dll 失败: " + ex.Message;
+            }
+            return false;
+        }
+
+        static bool Elevated()
+        {
+            try
+            {
+                using (System.Security.Principal.WindowsIdentity id =
+                    System.Security.Principal.WindowsIdentity.GetCurrent())
+                {
+                    return new System.Security.Principal.WindowsPrincipal(id)
+                        .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch { return false; }
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenSCManager(string machine, string database, uint access);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr OpenService(IntPtr scm, string name, uint access);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr CreateService(IntPtr scm, string name, string display, uint access,
+            uint type, uint startType, uint errControl, string path, string group, IntPtr tag,
+            string deps, string account, string password);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool StartService(IntPtr svc, int argc, string[] argv);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool CloseServiceHandle(IntPtr h);
+
+        enum SvcState { Running, Stopped, Unknown }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SERVICE_STATUS
+        {
+            public uint type, state, controlsAccepted, win32ExitCode, svcExitCode, checkpoint, waitHint;
+        }
+        [DllImport("advapi32.dll", SetLastError = true)]
+        static extern bool QueryServiceStatus(IntPtr svc, out SERVICE_STATUS st);
+
+        /// <summary>
+        /// 尽力保证 inpoutx64 内核驱动服务处于运行状态（幂等）。
+        /// 服务被清理工具删过、但驱动文件还在时，用系统目录的 .sys 重新登记（按需启动）。
+        /// 返回服务状态：Running / 存在但没跑起来 / 未知（根本找不到服务）。
+        /// </summary>
+        static SvcState EnsureDriverService()
+        {
+            const uint SC_MANAGER_CONNECT = 0x0001, SC_MANAGER_CREATE_SERVICE = 0x0002;
+            const uint SERVICE_START = 0x0010, SERVICE_QUERY_STATUS = 0x0004;
+            const uint SERVICE_KERNEL_DRIVER = 0x00000001, SERVICE_DEMAND_START = 0x00000003;
+            const uint SERVICE_ERROR_NORMAL = 0x00000001, SERVICE_RUNNING = 0x00000004;
+            IntPtr scm = IntPtr.Zero, svc = IntPtr.Zero;
+            try
+            {
+                scm = OpenSCManager(null, null, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+                if (scm == IntPtr.Zero) return SvcState.Unknown;
+                svc = OpenService(scm, "inpoutx64", SERVICE_START | SERVICE_QUERY_STATUS);
+                if (svc == IntPtr.Zero)
+                {
+                    string sys = System.IO.Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.System),
+                        "drivers\\inpoutx64.sys");
+                    if (!System.IO.File.Exists(sys)) return SvcState.Unknown;  // 交给 DLL 自己装
+                    svc = CreateService(scm, "inpoutx64", "inpoutx64",
+                        SERVICE_START | SERVICE_QUERY_STATUS, SERVICE_KERNEL_DRIVER,
+                        SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, sys, null, IntPtr.Zero, null, null, null);
+                    if (svc == IntPtr.Zero) return SvcState.Unknown;
+                }
+                StartService(svc, 0, null);                    // 已在运行/正在运行都会返回失败，忽略
+                SERVICE_STATUS st;
+                if (QueryServiceStatus(svc, out st) && st.state == SERVICE_RUNNING)
+                    return SvcState.Running;
+                return SvcState.Stopped;
+            }
+            catch { return SvcState.Unknown; }
+            finally
+            {
+                if (svc != IntPtr.Zero) CloseServiceHandle(svc);
+                if (scm != IntPtr.Zero) CloseServiceHandle(scm);
             }
         }
 
@@ -560,6 +673,7 @@ namespace LecooFanGui
         Stress stress = new Stress();
         string daemonWarning = "";
         bool firstSampleLogged;
+        int ecRetryTicks;                          // EC 冷启动补连：每 4 个 UI tick（约 2 秒）重试一次
 
         ModeCard[] modeCards;
         Sparkline spark;
@@ -1501,6 +1615,16 @@ namespace LecooFanGui
         void RefreshUi()
         {
             if (sampler == null) return;
+            // EC 冷启动补连：构造时那几轮重试还没连上就每 ~2 秒再试，直到连上为止
+            if (!ec.Available && ++ecRetryTicks >= 4)
+            {
+                ecRetryTicks = 0;
+                if (ec.TryOpen())
+                {
+                    Log("EC 已连接（冷启动重试成功，温度/风扇控制恢复工作）");
+                    sampler.LastError = "";
+                }
+            }
             if (!firstSampleLogged && sampler.Temp >= 0)
             {
                 firstSampleLogged = true;
