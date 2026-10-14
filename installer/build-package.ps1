@@ -8,11 +8,11 @@
                   默认关闭：本机 7-Zip 26.02 的 SFX 模块读不到内嵌配置
                   （InstallPath/RunProgram 全部被忽略，退化成"往当前目录解压"），
                   修好之前自解压 exe 不是一个可用的安装包，只有 zip 是。
-    用法: powershell -File installer\build-package.ps1 [-Version 1.0.0] [-WithSfx]
+    用法: powershell -File installer\build-package.ps1 [-Version 1.0.1] [-WithSfx]
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "1.0.1",
     [switch]$WithSfx
 )
 
