@@ -1,4 +1,9 @@
-# LecooFan
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo.svg" width="420" alt="LecooFan — N175L 风扇与 CPU 控制台 / Fan &amp; CPU console">
+  </picture>
+</p>
 
 **Lenovo N175L (Lecoo / 来酷) / ITE IT5570 EC 完整降噪方案**  
 **Complete quiet-cooling stack for N175L laptop**
