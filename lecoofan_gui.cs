@@ -692,6 +692,11 @@ namespace LecooFanGui
         NotifyIcon trayIcon;                       // 托盘模式（--tray / 开机自启动）用
         bool trayMode, allowClose, balloonShown;
         int lastTrayTemp = int.MinValue;
+        Size designSize;                           // 缩放后的设计尺寸：窗口被折腾到屏幕外时按它兜底
+        static EventWaitHandle showRequest;        // 别的实例发来的「把控制台显示出来」请求
+        const string ShowRequestName = "LecooFanGUI.ShowConsole";
+        const int ASFW_ANY = -1;
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int dwProcessId);
 
         public MainForm()
             : this(false)
@@ -709,6 +714,7 @@ namespace LecooFanGui
             BuildUi();
             ScaleTree(this, DpiScale, fontScale);
             Font = Ui.FontBase;
+            designSize = Size;                         // 此刻还是设计尺寸，托盘还原兜底用
 
             sampler = new Sampler(ec);
             sampler.Start();
@@ -733,11 +739,21 @@ namespace LecooFanGui
             trayMode = true;
             BuildTrayIcon();
             ShowInTaskbar = false;
+            // 最小化 + 无任务栏按钮的窗口会被 Windows 记到屏幕外的图标位置（-18286,-18286）。
+            // 还原时必须先把窗口摆回正常状态再切 ShowInTaskbar，否则那个坏坐标会被当成
+            // 「正常位置」写进重建后的句柄 —— 就是 v1.0.1「打不开控制台」的元凶。
             WindowState = FormWindowState.Minimized;
             Log("托盘模式：窗口不自动弹出，双击通知区图标可打开控制台。");
             if (trayIcon != null)
                 trayIcon.ShowBalloonTip(5000, "LecooFan 已在后台运行",
                     "控制台已收回托盘。双击图标打开，右键菜单可「交还风扇给 EC」或退出。", ToolTipIcon.Info);
+        }
+
+        /// <summary>监听「打开控制台」请求：已有实例时再双击一次快捷方式，由那个实例发来。</summary>
+        public void WatchShowRequests()
+        {
+            try { showRequest = new EventWaitHandle(false, EventResetMode.AutoReset, ShowRequestName); }
+            catch { showRequest = null; }   // 名字对象建不出来不影响主功能，只是少这个便利
         }
 
         void BuildTrayIcon()
@@ -757,10 +773,43 @@ namespace LecooFanGui
 
         void RestoreFromTray()
         {
-            ShowInTaskbar = true;
+            // 顺序要紧：先把窗口退出最小化，再切 ShowInTaskbar，最后校正坐标。
+            // 反过来的话（旧版就是这么写的），WinForms 会为切换 ShowInTaskbar 重建窗口句柄，
+            // 而最小化中的窗口只有任务栏图标位置（没有任务栏按钮就是屏幕外的 -18286,-18286），
+            // 那个坏坐标会被当成「正常位置」记进新句柄 —— 窗口"显示成功"却停在屏幕外，
+            // 用户看到的就是"打不开控制台"（连任务栏按钮都是点了没反应的）。
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            ShowInTaskbar = true;
+            EnsureWindowOnScreen();          // 句柄重建完才是最终坐标，摆正放最后
             Show();
             Activate();
+            BringToFront();
+            // 前台锁有时只让窗口抬到最上层、不给焦点（SetForegroundWindow 被静默拒绝）。
+            // 一步置顶脉冲保证它真的冒到人眼前 —— 用户要求打开控制台时，这就是他要的结果。
+            try { TopMost = true; TopMost = false; }
+            catch { }
+            Log("托盘: 控制台已打开。");
+        }
+
+        /// <summary>窗口跑到屏幕外 / 尺寸异常时，按设计尺寸带回主屏居中（托盘还原的兜底）。</summary>
+        void EnsureWindowOnScreen()
+        {
+            Rectangle b = Bounds;
+            bool ok = b.Width >= 320 && b.Height >= 320;
+            if (ok)
+            {
+                Rectangle title = new Rectangle(b.X, b.Y, Math.Min(b.Width, 240), 36);   // 标题栏那一条
+                ok = false;
+                foreach (Screen s in Screen.AllScreens)
+                    if (s.WorkingArea.IntersectsWith(title)) { ok = true; break; }
+            }
+            if (ok) return;
+            Size sz = designSize.Width >= 320 ? designSize : new Size(860, 760);
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            Size = sz;
+            Location = new Point(wa.Left + Math.Max(0, (wa.Width - sz.Width) / 2),
+                                 wa.Top + Math.Max(0, (wa.Height - sz.Height) / 2));
+            Log("窗口位置或尺寸异常（可能在屏幕外），已按设计尺寸带回主屏居中。");
         }
 
         void ReleaseFanToEc()
@@ -1615,6 +1664,13 @@ namespace LecooFanGui
         void RefreshUi()
         {
             if (sampler == null) return;
+            // 别的实例请求「打开控制台」（双击快捷方式 / 再运行一次 exe）：
+            // 搭在这条 500ms 的 UI 心跳上处理，不用另开线程
+            if (showRequest != null)
+            {
+                try { if (showRequest.WaitOne(0)) RestoreFromTray(); }
+                catch { }
+            }
             // EC 冷启动补连：构造时那几轮重试还没连上就每 ~2 秒再试，直到连上为止
             if (!ec.Available && ++ecRetryTicks >= 4)
             {
@@ -2097,6 +2153,21 @@ namespace LecooFanGui
             catch { return true; }  // mutex 出问题就别互相挡，照常启动
         }
 
+        /// <summary>请已有实例把控制台显示出来；返回是否通知到了（旧版本实例没有这条通道）。</summary>
+        static bool RequestShowExisting()
+        {
+            try
+            {
+                using (EventWaitHandle h = EventWaitHandle.OpenExisting(ShowRequestName))
+                {
+                    AllowSetForegroundWindow(ASFW_ANY);   // 不授权的话对方只能"在后台打开"，窗口不冒头
+                    h.Set();
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
         /// <summary>MainForm 构造前就能用的日志（单实例提示写在窗口还没建起来时）。</summary>
         static void LogLine(string msg)
         {
@@ -2127,6 +2198,7 @@ namespace LecooFanGui
                 try
                 {
                     MainForm f = new MainForm();
+                    f.WatchShowRequests();
                     f.EnableTray();
                     Application.Run(f);
                 }
@@ -2140,14 +2212,19 @@ namespace LecooFanGui
             if (args.Length > 0) { RunCli(args); return; }
             if (!EnsureSingleInstance())
             {
-                MessageBox.Show("LecooFan 已经在运行（窗口或托盘）。\r\n托盘里右键图标可以打开控制台。", "LecooFan");
+                // 已有实例（窗口或托盘）：请它把控制台显示出来。
+                // 只有对方是没这条通道的旧版本时才退回干提示（那时候也只好靠托盘图标）
+                if (!RequestShowExisting())
+                    MessageBox.Show("LecooFan 已经在运行（窗口或托盘）。\r\n托盘里右键图标可以打开控制台。", "LecooFan");
                 return;
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                Application.Run(new MainForm());
+                MainForm f = new MainForm();
+                f.WatchShowRequests();
+                Application.Run(f);
             }
             catch (Exception ex)
             {
