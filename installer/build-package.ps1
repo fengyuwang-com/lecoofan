@@ -86,7 +86,7 @@ foreach ($f in (Get-ChildItem $stage -Recurse -File)) {
 }
 $cscArgs = @("-nologo", "-codepage:65001", "-target:winexe", ("-out:" + $setupExe),
              ("-win32manifest:" + (Join-Path $PSScriptRoot "setup.manifest")),
-             ("-win32icon:" + (Join-Path $PSScriptRoot "lecoofan.ico")),
+             ("-win32icon:" + (Join-Path $root "assets\lecoofan.ico")),
              "-r:System.dll", "-r:System.Windows.Forms.dll", "-r:System.Drawing.dll") +
            $resArgs + @((Join-Path $PSScriptRoot "lecoofan_setup.cs"))
 & $csc @cscArgs

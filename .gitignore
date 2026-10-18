@@ -25,6 +25,10 @@ dist/
 # 用户配置（本机测试用，不入库）
 lecoofan_gui.cfg
 
+# Python 缓存 + 图标预览图（assets/make_icon.py 生成）
+__pycache__/
+assets/lecoofan-preview.png
+
 # 会话记忆与工具状态（本机用，不入库）
 FENGMEM.md
 .zcode/

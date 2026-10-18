@@ -3,7 +3,10 @@
 // Build (uses the .NET Framework compiler that ships with Windows — no installs):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe ^
 //       /out:LecooFanGUI.exe /win32manifest:lecoofan_gui.manifest ^
+//       /win32icon:assets\lecoofan.ico /resource:assets\lecoofan.ico,LecooFan.AppIcon.ico ^
 //       /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll lecoofan_gui.cs lecoofan_ui.cs
+//   (/win32icon 给 exe 自己，/resource 给窗口标题栏+任务栏：WinForms 窗体默认图标是 .NET 那个白板，
+//    不显式设 Form.Icon 就永远不会用 exe 的图标。图标由 assets/make_icon.py 从 logo.svg 生成。)
 //
 // What it does
 //   1. CPU modes  : writes the power scheme directly through powrprof (no powercfg windows).
@@ -676,6 +679,7 @@ namespace LecooFanGui
         string daemonWarning = "";
         bool firstSampleLogged;
         int ecRetryTicks;                          // EC 冷启动补连：每 4 个 UI tick（约 2 秒）重试一次
+        int uiTicks;                               // UI 心跳计数（500ms 一格），心跳日志按它计时
 
         ModeCard[] modeCards;
         Sparkline spark;
@@ -701,12 +705,20 @@ namespace LecooFanGui
         System.Windows.Forms.Timer uiTimer;
         NotifyIcon trayIcon;                       // 托盘模式（--tray / 开机自启动）用
         bool trayMode, allowClose, balloonShown;
+        bool trayIconWarned;                       // 托盘图标画失败只记一条日志，不刷屏
         int lastTrayTemp = int.MinValue;
         Size designSize;                           // 缩放后的设计尺寸：窗口被折腾到屏幕外时按它兜底
         static EventWaitHandle showRequest;        // 别的实例发来的「把控制台显示出来」请求
         const string ShowRequestName = "LecooFanGUI.ShowConsole";
         const int ASFW_ANY = -1;
         [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int dwProcessId);
+        [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr hIcon);
+        [DllImport("user32.dll")] static extern uint GetGuiResources(IntPtr hProcess, uint uiFlags);
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        const int WM_SETICON = 0x0080, ICON_SMALL = 0, ICON_BIG = 1;
+        const string AppIconResource = "LecooFan.AppIcon.ico";   // build 的 /resource: 标识符，见文件头注释
+        Icon appIconBig, appIconSmall;             // 标题栏 + 任务栏用的 Logo（内嵌 assets/lecoofan.ico）
+        static readonly DateTime StartedAt = DateTime.Now;       // 心跳日志里的运行时长
 
         public MainForm()
             : this(false)
@@ -723,6 +735,7 @@ namespace LecooFanGui
             Ui.SetScaleBaked(DpiScale, fontScale);
             Ui.TouchFonts();                           // BuildUi 之前把主题字体建好
             BuildUi();
+            ApplyAppIcon();                            // 标题栏/任务栏换成 Logo（默认是 .NET 那个白板窗体图标）
             ScaleTree(this, DpiScale, fontScale);
             Font = Ui.FontBase;
             LayoutUi();                                // 按实际客户区摆一遍（设计尺寸下与 BuildUi 写的坐标一致）
@@ -782,7 +795,7 @@ namespace LecooFanGui
         {
             if (trayIcon != null) return;
             trayIcon = new NotifyIcon();
-            trayIcon.Icon = BuildFanIcon(-1);
+            trayIcon.Icon = SafeFanIcon(-1);
             trayIcon.Text = "LecooFan 控制台";
             trayIcon.Visible = true;
             trayIcon.DoubleClick += delegate { RestoreFromTray(); };
@@ -791,6 +804,24 @@ namespace LecooFanGui
             menu.MenuItems.Add("交还风扇给 EC", delegate { ReleaseFanToEc(); });
             menu.MenuItems.Add("退出", delegate { allowClose = true; Close(); });
             trayIcon.ContextMenu = menu;
+        }
+
+        /// <summary>
+        /// 托盘图标是装饰品，画不出来也绝不能影响主功能 —— 风扇还在程序手里，界面崩了才是真事故。
+        /// 出错只记一条日志（trayIconWarned 保证不刷屏）。
+        /// </summary>
+        Icon SafeFanIcon(int temp)
+        {
+            try { return BuildFanIcon(temp); }
+            catch (Exception ex)
+            {
+                if (!trayIconWarned)
+                {
+                    trayIconWarned = true;
+                    Log("错误: 托盘图标绘制失败（已忽略，不影响风扇控制）: " + ex.Message);
+                }
+                return null;
+            }
         }
 
         void RestoreFromTray()
@@ -846,7 +877,102 @@ namespace LecooFanGui
             catch { }
         }
 
-        /// <summary>托盘 logo：三叶风扇徽标，颜色随温度（凉=品牌蓝/绿，烫=红）。</summary>
+        // ── 窗口图标（标题栏 + 任务栏）──
+        //
+        // WinForms 的 Form 默认图标是 .NET 自带的那个白板窗体（wfc.ico），**不是** exe 的 /win32icon，
+        // 所以光给 exe 加图标，标题栏和任务栏按钮上还是白板 —— 必须显式把 Logo 塞进 Form.Icon。
+        // Logo 是 assets/lecoofan.ico（9 个尺寸的 DIB，见 assets/make_icon.py），由编译参数
+        // /resource:...LecooFan.AppIcon.ico 嵌进 exe，和 /win32icon: 用的是同一份文件。
+
+        void ApplyAppIcon()
+        {
+            byte[] data = ReadAppIconResource();
+            if (data == null)
+            {
+                Log("窗口图标: 没找到内嵌 Logo 资源（exe 编译时漏了 /resource:），标题栏沿用系统默认图标。");
+                return;
+            }
+            try
+            {
+                appIconBig = new Icon(new System.IO.MemoryStream(data), 32, 32);     // 任务栏 / Alt-Tab
+                appIconSmall = new Icon(new System.IO.MemoryStream(data), 16, 16);   // 标题栏左上角
+                Icon = appIconBig;
+                Log("窗口图标: Logo 已加载（" + IconSizes(data) + " px 共 " + CountIconEntries(data) + " 个尺寸），标题栏/任务栏生效。");
+            }
+            catch (Exception ex)
+            {
+                Log("窗口图标: 加载失败，标题栏沿用系统默认图标 — " + ex.Message);
+            }
+        }
+
+        static byte[] ReadAppIconResource()
+        {
+            try
+            {
+                using (System.IO.Stream s = typeof(MainForm).Assembly.GetManifestResourceStream(AppIconResource))
+                {
+                    if (s == null) return null;
+                    byte[] buf = new byte[s.Length];
+                    int off = 0;
+                    while (off < buf.Length)
+                    {
+                        int r = s.Read(buf, off, buf.Length - off);
+                        if (r <= 0) break;
+                        off += r;
+                    }
+                    return buf;
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>读 ICO 目录列出尺寸（顺便验证结构没坏，坏文件在这里就露馅）。</summary>
+        static string IconSizes(byte[] ico)
+        {
+            if (ico == null || ico.Length < 6) return "?";
+            int n = CountIconEntries(ico);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n && 6 + 16 * (i + 1) <= ico.Length; i++)
+            {
+                int b = ico[6 + 16 * i];
+                sb.Append(b == 0 ? "256" : b.ToString());
+                if (i < n - 1) sb.Append("/");
+            }
+            return sb.ToString();
+        }
+
+        static int CountIconEntries(byte[] ico)
+        {
+            return (ico == null || ico.Length < 6) ? 0 : (ico[4] | (ico[5] << 8));
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // WinForms 只会拿 Form.Icon（32px）缩一份给标题栏，边缘发虚；
+            // 这里直接用 ICO 里的 16px 条目盖掉 ICON_SMALL，标题栏才是逐像素清晰的。
+            if (appIconSmall != null)
+                SendMessage(Handle, WM_SETICON, (IntPtr)ICON_SMALL, appIconSmall.Handle);
+        }
+
+        /// <summary>进程当前 GDI 对象数 —— 抓句柄泄漏的那把尺子（正常应该稳定不动）。</summary>
+        static int GuiObjects()
+        {
+            try
+            {
+                using (Process p = Process.GetCurrentProcess())
+                    return (int)GetGuiResources(p.Handle, 0);   // 0 = GR_GDIOBJECTS
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>
+        /// 托盘 logo：三叶风扇徽标，颜色随温度（凉=品牌蓝/绿，烫=红）。
+        /// 注意句柄归属：Bitmap.GetHicon() 出来的 HICON 不归 Icon 对象管，
+        /// Icon.FromHandle() 包一层再 Dispose() **不会**销毁它 —— 每次重建漏一个 GDI 句柄，
+        /// 一万个上限一到 GetHicon() 就抛「GDI+ 中发生一般性错误」，程序当场崩（实测跑了 12.7 小时踩中）。
+        /// 正确姿势：Clone() 拷一份自己持有的图标，然后 DestroyIcon 掉原句柄。
+        /// </summary>
         static Icon BuildFanIcon(int temp)
         {
             double t = temp < 0 ? 0.0 : Math.Max(0, Math.Min(1, (temp - 40) / 45.0));
@@ -870,7 +996,9 @@ namespace LecooFanGui
                     g.FillEllipse(hubBrush, 11, 11, 10, 10);           // 轮毂
                     g.FillEllipse(blade, 14, 14, 4, 4);                // 中心铆钉
                 }
-                return Icon.FromHandle(bmp.GetHicon());
+                IntPtr h = bmp.GetHicon();
+                try { return (Icon)Icon.FromHandle(h).Clone(); }        // Clone 出来的 Icon 自己持句柄
+                finally { DestroyIcon(h); }                            // 原句柄必须销毁，否则泄漏
             }
         }
 
@@ -885,9 +1013,13 @@ namespace LecooFanGui
             if (sampler.Temp == lastTrayTemp && trayIcon.Tag != null) return;
             lastTrayTemp = sampler.Temp;
             Icon old = trayIcon.Icon;
-            trayIcon.Icon = BuildFanIcon(sampler.Temp);
-            trayIcon.Tag = new object();
-            if (old != null) old.Dispose();         // 旧图标是 HICON 句柄，不释放会泄漏
+            Icon fresh = SafeFanIcon(sampler.Temp);
+            if (fresh != null)
+            {
+                trayIcon.Icon = fresh;
+                trayIcon.Tag = new object();
+                if (old != null) old.Dispose();     // 这份 Icon 自己持句柄，Dispose 真的会释放
+            }
         }
 
         // ── 配置持久化：启动自动恢复上次的 CPU 档位 + 风扇设置 ──
@@ -918,6 +1050,13 @@ namespace LecooFanGui
                     sb.AppendLine("win=" + ws.Width + "x" + ws.Height);
                 sb.AppendLine("max=" + (WindowState == FormWindowState.Maximized ? 1 : 0));
                 System.IO.File.WriteAllText(CfgFile, sb.ToString(), Encoding.UTF8);
+                // 配置只在用户动作时写（不是每个心跳），所以顺手记一行：排查「改了没生效」时
+                // 一眼能看出到底是没写进去，还是写了没读回来
+                Log(string.Format("配置已保存: cpu={0} fan={1} cap={2} pwm=0x{3:X2} epp={4} turbo={5} cool={6}{7}",
+                    cur != null ? cur.Key : "keep", fan, sampler != null ? sampler.SilentRpmCap : 2000,
+                    sampler != null ? sampler.ManualPwm : 0x30, trkEpp.Value,
+                    chkTurbo.Checked ? 1 : 0, cmbCool.SelectedIndex == 0 ? 1 : 0,
+                    sb.ToString().Contains("win=") ? " win=" + ws.Width + "x" + ws.Height : ""));
             }
             catch { }
         }
@@ -999,7 +1138,7 @@ namespace LecooFanGui
         void Log(string s)
         {
             string line = string.Format("[{0:HH:mm:ss}] {1}", DateTime.Now, s);
-            try { System.IO.File.AppendAllText(LogFile, line + "\r\n", Encoding.UTF8); } catch { }
+            AppendLogFile(line);
             txtLog.AppendText(line + "\r\n");
             if (txtLog.Lines.Length > 400)
             {
@@ -1007,6 +1146,64 @@ namespace LecooFanGui
                 Array.Copy(txtLog.Lines, txtLog.Lines.Length - 200, keep, 0, 200);
                 txtLog.Lines = keep;
             }
+        }
+
+        /// <summary>
+        /// 日志文件滚动：超过 1 MB 就把当前文件改名成 .1（旧的 .1 删掉），新日志从头写。
+        /// 常驻托盘跑几周，不滚动的话日志会无限长大（排查问题时也不好翻）。
+        /// </summary>
+        const long LogMaxBytes = 1024 * 1024;
+        static void AppendLogFile(string line)
+        {
+            try
+            {
+                System.IO.FileInfo fi = new System.IO.FileInfo(LogFile);
+                if (fi.Exists && fi.Length > LogMaxBytes)
+                {
+                    string old = LogFile + ".1";
+                    if (System.IO.File.Exists(old)) System.IO.File.Delete(old);
+                    System.IO.File.Move(LogFile, old);
+                    System.IO.File.AppendAllText(LogFile,
+                        string.Format("[{0:HH:mm:ss}] ── 日志超过 1 MB，上一份已滚到 {1} ──\r\n",
+                            DateTime.Now, System.IO.Path.GetFileName(old)), Encoding.UTF8);
+                }
+                System.IO.File.AppendAllText(LogFile, line + "\r\n", Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 心跳日志：每 5 分钟一行，把「看一眼就知道有没有变坏」的指标串起来。
+        /// 为什么要它：2026-10-14 那次 GDI+ 崩溃（托盘图标句柄泄漏）如果日志里有 GDI 对象数，
+        /// 一眼就能看出它从 40 一路爬到一万，而不用等 12.7 小时后弹异常框。
+        /// 一行搞定，方便 grep "心跳" 拉趋势。
+        /// </summary>
+        const int HeartbeatTicks = 600;            // 600 × 500ms = 5 分钟
+        void LogHeartbeat()
+        {
+            string fan;
+            if (!ec.Available) fan = "EC 不可用";
+            else if (sampler.Mode == FanMode.Silent)
+                fan = string.Format("静音上限 {0} (目标 {1}, 实测 {2}{3})",
+                    sampler.SilentRpmCap, Hex(sampler.TargetPwm), Hex(sampler.Pwm),
+                    sampler.SilentLaidOpen ? ", 护栏已放开" : "");
+            else if (sampler.Mode == FanMode.Curve) fan = string.Format("曲线 (目标 {0}, 实测 {1})", Hex(sampler.TargetPwm), Hex(sampler.Pwm));
+            else if (sampler.Mode == FanMode.Manual) fan = string.Format("手动 (实测 {0})", Hex(sampler.Pwm));
+            else fan = string.Format("EC 自动 (实测 {0})", Hex(sampler.Pwm));
+            Log(string.Format("心跳: 温度 {0} / 风扇 {1} / {2} / 最高核心 {3} / 负载 {4} / GDI 对象 {5} / 内存 {6} MB / 已运行 {7:0.0} 小时",
+                sampler.Temp >= 0 ? sampler.Temp + "C" : "—",
+                sampler.Rpm > 0 ? sampler.Rpm + " RPM" : "—",
+                fan,
+                sampler.MaxMhz > 0 ? string.Format("{0:0} MHz", sampler.MaxMhz) : "—",
+                sampler.LoadPct > 0 ? string.Format("{0:0} %", sampler.LoadPct) : "—",
+                GuiObjects(), Environment.WorkingSet / (1024 * 1024),
+                (DateTime.Now - StartedAt).TotalHours));
+        }
+
+        /// <summary>读不到的寄存器（0xFFFFFFFF）在日志里写成「—」，别让人以为是真值。</summary>
+        static string Hex(int v)
+        {
+            return v >= 0 && v <= 0xFF ? string.Format("0x{0:X2}", v) : "—";
         }
 
         void BuildUi()
@@ -2018,6 +2215,7 @@ namespace LecooFanGui
             if (spark != null) spark.Add(sampler.Temp, sampler.Rpm, sampler.Pwm);
             lblFreqNote.Text = sampler.FreqNote.Length > 0 ? sampler.FreqNote : "";
             if (sampler.LastError.Length > 0) { Log("错误: " + sampler.LastError); sampler.LastError = ""; }
+            if (++uiTicks % HeartbeatTicks == 0) LogHeartbeat();
             RefreshSettingsLine();
             RefreshFanState();
             UpdateTrayIcon();
@@ -2056,6 +2254,10 @@ namespace LecooFanGui
             SaveSettings();
             try
             {
+                Log(string.Format("退出: 保存配置完毕，风扇交还 EC 自动控制（退出前状态: 温度 {0} / {1} RPM / GDI 对象 {2} / 已运行 {3:0.0} 小时）。",
+                    sampler != null && sampler.Temp >= 0 ? sampler.Temp + "C" : "—",
+                    sampler != null && sampler.Rpm > 0 ? sampler.Rpm.ToString() : "—",
+                    GuiObjects(), (DateTime.Now - StartedAt).TotalHours));
                 soak.Running = false;
                 if (sampler != null) { sampler.Mode = FanMode.Auto; sampler.Stop(); }
                 if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
@@ -2319,6 +2521,37 @@ namespace LecooFanGui
                     }
                     f.Close();
                 }
+                else if (cmd == "--heartbeat")
+                {
+                    // 打印一条心跳日志（内容和每 5 分钟自动写的那条一模一样），
+                    // 省得为了看一眼格式等 5 分钟
+                    MainForm f = new MainForm(true);
+                    f.Show();
+                    Application.DoEvents();
+                    int t0 = GuiObjects();
+                    f.LogHeartbeat();
+                    sb.AppendLine(string.Format("（心跳里的 GDI 对象数实测 {0}，与 --tray-icon-test 同一把尺子）", t0));
+                    f.Close();
+                }
+                else if (cmd == "--tray-icon-test")
+                {
+                    // 托盘图标泄漏自测：反复重建/释放图标，量 GDI 对象数的变化。
+                    // 老写法（Icon.FromHandle(bmp.GetHicon()) 之后 Dispose 旧图标）每轮漏一个 HICON，
+                    // 攒到一万个上限，GetHicon() 就抛「GDI+ 中发生一般性错误」把程序打死 —— 2026-10-14 实崩。
+                    int n = args.Length >= 2 ? int.Parse(args[1]) : 2000;
+                    BuildFanIcon(-1).Dispose();       // 先画一个：GDI+ 内部缓存（画笔/画刷）第一次用就建好了，
+                    int before = GuiObjects();        // 不预热的话测到的是缓存不是泄漏
+                    for (int i = 0; i < n; i++)
+                    {
+                        Icon ic = MainForm.BuildFanIcon(i % 100);
+                        ic.Dispose();
+                    }
+                    int after = GuiObjects();
+                    double per = (after - before) / (double)n;
+                    sb.AppendLine(string.Format("托盘图标重建 {0} 次: GDI 对象 {1} → {2} (Δ{3}, 每轮 {4:0.000})",
+                        n, before, after, after - before, per));
+                    sb.AppendLine(per < 0.05 ? "ICON-LEAK: PASS (无泄漏)" : "ICON-LEAK: FAIL");
+                }
                 else if (cmd == "--fan-cap" && args.Length >= 2)
                 {
                     // 静音上限：锁转速快速验证。可跟 [秒数] [CPU档位] 两个可选参数
@@ -2529,9 +2762,19 @@ namespace LecooFanGui
         /// <summary>MainForm 构造前就能用的日志（单实例提示写在窗口还没建起来时）。</summary>
         static void LogLine(string msg)
         {
+            AppendLogFile(string.Format("[{0:HH:mm:ss}] {1}", DateTime.Now, msg));
+        }
+
+        /// <summary>未处理异常统一落盘（带堆栈），界面线程的异常吞掉继续跑 —— 风扇还在程序手里，界面崩了才是事故。</summary>
+        static void LogException(string where, Exception ex)
+        {
             try
             {
-                System.IO.File.AppendAllText(LogFile, string.Format("[{0:HH:mm:ss}] {1}\r\n", DateTime.Now, msg));
+                LogLine(string.Format("错误: {0}: {1}: {2}", where, ex.GetType().Name, ex.Message));
+                if (ex.StackTrace != null)
+                    foreach (string l in ex.StackTrace.Split('\n')) LogLine("    " + l.Trim());
+                if (ex.InnerException != null)
+                    LogLine("    内部异常: " + ex.InnerException.Message);
             }
             catch { }
         }
@@ -2541,6 +2784,21 @@ namespace LecooFanGui
         {
             bool tray = false;
             foreach (string a in args) if (a == "--tray") tray = true;
+
+            // 未处理异常一律记日志（带堆栈）：崩溃后能翻出原因，而不是只弹一个「GDI+ 中发生一般性错误」。
+            // 界面线程的异常吞掉继续跑 —— 风扇控制还挂在程序身上，界面挂了才是真事故。
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
+            {
+                LogException("非界面线程未处理异常", e.ExceptionObject as Exception);
+            };
+            if (tray || args.Length == 0)
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e)
+                {
+                    LogException("界面线程未处理异常（已忽略，程序继续运行）", e.Exception);
+                };
+            }
 
             if (tray)
             {

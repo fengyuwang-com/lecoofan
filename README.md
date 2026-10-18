@@ -221,7 +221,7 @@ powershell -File installer\build-package.ps1 -Version 1.0.1
 
 - `dist/LecooFan-Setup-<ver>/`（staging 目录，18 个文件）
 - `dist/LecooFan-Setup-<ver>.zip`（便携形态）
-- `dist/LecooFan-Setup-<ver>.exe`（★ 引导安装器）：把 staging 全部文件作为 `payload/…` 资源嵌进单个 exe（源码 `installer/lecoofan_setup.cs`，管理员清单 `installer/setup.manifest`），运行时解压到 `%TEMP%\LecooFanSetup` 并调用 `Install-LecooFan.ps1`。图标由 `installer/make_icon.cs` 生成（`installer/lecoofan.ico`，与托盘同款三叶徽标，多尺寸 DIB）。
+- `dist/LecooFan-Setup-<ver>.exe`（★ 引导安装器）：把 staging 全部文件作为 `payload/…` 资源嵌进单个 exe（源码 `installer/lecoofan_setup.cs`，管理员清单 `installer/setup.manifest`），运行时解压到 `%TEMP%\LecooFanSetup` 并调用 `Install-LecooFan.ps1`。图标用 `assets/lecoofan.ico`（由 `assets/make_icon.py` 从 logo.svg 生成，与窗口/任务栏/托盘同一个 logo，9 个尺寸的 DIB）。
 
 `-WithSfx` 是保留的旧实验（7-Zip 自解压：本机 7-Zip 26.02 读不到内嵌配置，不可用）——现在用引导安装器 exe 替代它。
 
@@ -400,7 +400,19 @@ restore_cpu.bat        # 还原出厂（睿频回来）
 右下角「压力测试 10 秒」会拉起 14 个线程，统计这段时间的**最高核心频率 / 最高温度 / 最高转速 / 平均负载**，
 方便在两个档位之间直接对比（听感差别 + 数字差别）。
 
-窗口内的日志同时写入同目录的 `lecoofan_gui.log`。
+窗口内的日志同时写入同目录的 `lecoofan_gui.log`（UTF-8）。标题栏、任务栏按钮和 exe 图标都是同一个
+logo（`assets/lecoofan.ico`，9 个尺寸）；托盘图标则是**按温度变色**的三叶徽标（凉=绿、烫=红）。
+
+**日志怎么用（排查问题看这里）**
+
+- **滚动**：超过 1 MB 自动改名成 `lecoofan_gui.log.1`（旧的 `.1` 删掉）——托盘模式跑几周也不会涨到几百 MB。
+- **心跳**：每 5 分钟一行 `心跳: 温度 … / 风扇 … / GDI 对象 … / 内存 … MB / 已运行 … 小时`。
+  GDI 对象数和内存就是抓句柄/内存泄漏的两把尺子：**正常应该一直贴在几十上下不动**，
+  一路往上爬就是泄漏（2026-10-14 那次 GDI+ 崩溃就是这么一眼能看出来的，见 `docs/reports/`）。
+- **异常**：界面线程和非界面线程的未处理异常都会带类型/消息/调用栈写进日志；
+  界面线程的异常还会弹一次「继续/退出」之后继续跑（不再像以前那样静默消失）。
+- **动作留痕**：模式切换、风扇模式/上限/手动 PWM、微调应用、配置保存、配置恢复、EC 断线重连、
+  托盘收回/交还、压力测试与长跑的开始和结果、窗口图标加载 —— 都有对应日志行。
 
 **命令行（免开窗口，可脚本化）：**
 
@@ -415,6 +427,8 @@ LecooFanGUI.exe --fan-curve 10    # 接管风扇 10 秒（走静音曲线）后�
 LecooFanGUI.exe --fan-off         # 立即交还风扇给 EC
 LecooFanGUI.exe --diag            # EC 与性能计数器诊断
 LecooFanGUI.exe --dumpui [scale]     # 布局自检：设计/下限/放大/最小四种窗口尺寸各渲染一遍，查重叠/溢出/切字
+LecooFanGUI.exe --tray-icon-test [n] # 托盘图标泄漏自测：重建 n 次图标，量 GDI 对象数变化（默认 2000）
+LecooFanGUI.exe --heartbeat          # 立刻打印一条心跳日志（和每 5 分钟自动写的那条一样）
 ```
 
 ### 把风扇锁在 2000 RPM（静音上限 / Silent Cap）
@@ -471,12 +485,17 @@ cd C:\Projects\lecoofan
 # 图形控制台（带 requireAdministrator + dpiAware 清单）
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -codepage:65001 ^
   -target:winexe -out:LecooFanGUI.exe -win32manifest:lecoofan_gui.manifest ^
+  -win32icon:assets\lecoofan.ico -resource:assets\lecoofan.ico,LecooFan.AppIcon.ico ^
   -r:System.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll lecoofan_gui.cs lecoofan_ui.cs
 
 # 开机启动桩（不能加清单：带了管理员清单每次登录都会弹 UAC）
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -codepage:65001 ^
-  -target:winexe -out:LecooFanTray.exe lecoofan_tray.cs
+  -target:winexe -out:LecooFanTray.exe -win32icon:assets\lecoofan.ico lecoofan_tray.cs
 ```
+
+`-win32icon:` 给 exe 本身（资源管理器、安装器、快捷方式都读它）；`-resource:` 把同一个 ICO 嵌进程序集，
+运行时由 `MainForm.ApplyAppIcon()` 塞进 `Form.Icon` + `WM_SETICON`。**两个都要**：WinForms 窗体的默认图标是
+.NET 自带的那个白板窗体，不会自动用 exe 的图标，只给 `-win32icon:` 的话标题栏和任务栏按钮还是白板。
 
 编译完重新跑一次 `LecooFanGUI.exe --install-autostart`（管理员）就会把新的 exe 挂到启动项上。
 
@@ -810,6 +829,11 @@ python lecoofan.py
 ```
 C:\Projects\lecoofan\          # ★ 本项目的根目录
 │
+├── assets\                          # ★ 品牌资产（README 头部 logo + 应用图标）
+│   ├── logo.svg / logo-dark.svg     # 主 logo（亮/暗两版，README 头部 <picture> 用）
+│   ├── make_icon.py                 # 从 logo.svg 生成应用图标（无头 Edge 渲染 + 打包多尺寸 DIB ICO）
+│   └── lecoofan.ico                 # ★ 应用图标（9 个尺寸）：exe / 窗口标题栏 / 任务栏 / 安装器共用
+│
 ├── lecoofan.py                       # 风扇控制守护进程（核心）
 │   ├── class EC                     # EC 寄存器读写 (inpoutx64)
 │   ├── temp_to_pwm()                # 温度→PWM 插值
@@ -834,9 +858,7 @@ C:\Projects\lecoofan\          # ★ 本项目的根目录
 │   ├── Uninstall-LecooFan.ps1       # 卸载逻辑：交还风扇→删任务/启动项/ARP/目录
 │   ├── lecoofan_setup.cs            # ★ 引导安装器源码（单 exe，内嵌全部安装文件）
 │   ├── setup.manifest               # 安装器清单（requireAdministrator + DPI）
-│   ├── make_icon.cs                 # 图标生成工具（产出 lecoofan.ico）
-│   ├── lecoofan.ico                 # 安装器图标（三叶徽标，多尺寸 DIB）
-│   └── build-package.ps1            # 打包：staging + zip + 引导安装器 exe
+│   └── build-package.ps1            # 打包：staging + zip + 引导安装器 exe（图标用 assets/lecoofan.ico）
 │
 ├── start_fan.bat                    # 双击启动（前台窗口）
 ├── stop_fan.bat                     # 双击恢复出厂（安全入口）
