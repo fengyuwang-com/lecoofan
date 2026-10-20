@@ -4,7 +4,7 @@
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe ^
 //       /out:LecooFanGUI.exe /win32manifest:lecoofan_gui.manifest ^
 //       /win32icon:assets\lecoofan.ico /resource:assets\lecoofan.ico,LecooFan.AppIcon.ico ^
-//       /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll lecoofan_gui.cs lecoofan_ui.cs
+//       /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Management.dll lecoofan_gui.cs lecoofan_ui.cs
 //   (/win32icon 给 exe 自己，/resource 给窗口标题栏+任务栏：WinForms 窗体默认图标是 .NET 那个白板，
 //    不显式设 Form.Icon 就永远不会用 exe 的图标。图标由 assets/make_icon.py 从 logo.svg 生成。)
 //
@@ -29,6 +29,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Management;
 using Microsoft.Win32;
 
 namespace LecooFanGui
@@ -790,7 +791,7 @@ namespace LecooFanGui
         int chargeLimitStop = -1;                   // -1 = 没配过（绝不碰 EC）；0 = 不限制；>0 = 停充阈值
         bool chargeLimitPending;                   // 配置里有值但 EC 还没连上，连上就补写
         int battSoc = -1;                           // 电量百分比（GetSystemPowerStatus 读）
-        bool battCharging = false;                  // 系统认为正在充电（BatteryFlag bit7）
+        bool battCharging = false;                  // 系统认为正在充电（BatteryFlag 的 0x08 位；平滑过的状态位，证据价值低）
         bool battOnAc = false;                      // 交流电在位（ACLineStatus）
         int chargeFixTicks;                         // 限值被改后补写的节流计数
         Button btnApply, btnHelp, btnDir, btnExit;
@@ -2483,14 +2484,29 @@ namespace LecooFanGui
                         rb[0], rb[1], soc, extra);
                     lblBattState.ForeColor = Ui.Good;
                 }
-                // 限值写了固件到底执不执行，只能看行为：电量已经过线还在充 = 没执行。
+                // 限值写了固件到底执不执行，只能看行为，而且必须有真实充电电流才有意义
+                // （Windows 报的 charging 标志是平滑过的，插电恒为真，不能当证据）。
                 if (lblBattHint != null)
                 {
-                    if (rb[0] > 0 && battCharging && battSoc >= rb[0])
+                    AcpiBattery ab = AcpiBattery.Get();
+                    bool reallyCharging = ab.Ok && ab.ChargeRate > 0;
+                    if (rb[0] > 0 && battOnAc && ab.Ok && ab.ChargeRate <= 0 && ab.DischargeRate <= 0)
                     {
-                        lblBattHint.Text = "⚠ 已到限值仍在充电：限值可能没被执行。把电量放到 " +
-                            rb[0] + "% 以下再充一次验证（本机充电器本身就在 ~95% 停充，别被它骗了）。";
+                        lblBattHint.Text = "插着电，但真实电流 0 mW：充电器本身没在工作，跟限值无关。"
+                            + "先救活充电器（拔插适配器 / 放电唤醒）再验证限值。";
                         lblBattHint.ForeColor = Ui.Bad;
+                    }
+                    else if (rb[0] > 0 && reallyCharging && battSoc >= rb[0])
+                    {
+                        lblBattHint.Text = "⚠ 已到限值仍在充电（真实电流 " + ab.ChargeRate +
+                            " mW）：限值没被执行。";
+                        lblBattHint.ForeColor = Ui.Bad;
+                    }
+                    else if (rb[0] > 0 && reallyCharging && battSoc >= 0 && battSoc < rb[0])
+                    {
+                        lblBattHint.Text = "正在充电（" + ab.ChargeRate + " mW），等电量涨到 " +
+                            rb[0] + "% 时看是否停充。";
+                        lblBattHint.ForeColor = Ui.Muted;
                     }
                     else if (rb[0] > 0 && battSoc >= 0 && battSoc < rb[0])
                     {
@@ -2530,6 +2546,49 @@ namespace LecooFanGui
         }
         [DllImport("kernel32.dll")] static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS s);
 
+        /// <summary>ACPI 真实充/放电电流（WMI root\wmi\BatteryStatus）。
+        /// Windows 的 BatteryFlag 充电位是**平滑过的状态位**，插着电就恒为真，
+        /// 拿它判断「有没有在充电」等于没判断；只有这里的 ChargeRate / DischargeRate 说了算。
+        /// WMI 查询要 100~300 ms，缓存 5 秒给 UI 用。</summary>
+        class AcpiBattery
+        {
+            public int ChargeRate = -1;      // mW，-1 = 读不到
+            public int DischargeRate = -1;   // mW
+            public bool Ok = false;
+
+            static DateTime lastQuery = DateTime.MinValue;
+            static AcpiBattery cached = new AcpiBattery();
+
+            public static AcpiBattery Get()
+            {
+                if ((DateTime.Now - lastQuery).TotalSeconds < 5) return cached;
+                lastQuery = DateTime.Now;
+                AcpiBattery r = new AcpiBattery();
+                try
+                {
+                    // 注意：WQL 里写 "FROM root\wmi\BatteryStatus" 会报「无效查询」，
+                    // 必须显式给命名空间 scope（实测过）。
+                    using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                        new ManagementScope(@"\\.\root\wmi"),
+                        new ObjectQuery("SELECT ChargeRate, DischargeRate FROM BatteryStatus")))
+                    {
+                        foreach (ManagementObject o in s.Get())
+                        {
+                            object cr = o["ChargeRate"];
+                            object dr = o["DischargeRate"];
+                            if (cr != null) r.ChargeRate = Convert.ToInt32(cr);
+                            if (dr != null) r.DischargeRate = Convert.ToInt32(dr);
+                            r.Ok = true;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+                cached = r;
+                return r;
+            }
+        }
+
         /// <summary>电量和充电状态的文字描述（CLI 用来判断限值有没有真被执行）。</summary>
         static string PowerStateText()
         {
@@ -2539,14 +2598,22 @@ namespace LecooFanGui
                 if (!GetSystemPowerStatus(out st)) return "电量: 读不到";
                 string soc = st.BatteryLifePercent <= 100 ? st.BatteryLifePercent + "%" : "—";
                 string ac = st.ACLineStatus == 1 ? "交流电在位" : "电池供电";
-                string chg = (st.BatteryFlag & 0x08) != 0 ? "，正在充电" :
-                             ((st.BatteryFlag & 0x10) != 0 ? "，正在放电" : "，未充未放");
-                return "电量 " + soc + " · " + ac + chg;
+                string chg = (st.BatteryFlag & 0x08) != 0 ? "，系统报充电中" :
+                             ((st.BatteryFlag & 0x10) != 0 ? "，系统报放电中" : "，未充未放");
+                // 真正的电流（Windows 那个标志位是平滑过的，只能当参考）
+                AcpiBattery ab = AcpiBattery.Get();
+                string real = ab.Ok
+                    ? (ab.ChargeRate > 0 ? "，真实充电 " + ab.ChargeRate + " mW"
+                       : (ab.DischargeRate > 0 ? "，真实放电 " + ab.DischargeRate + " mW"
+                                              : "，真实电流 0 mW（没在充也没在放）"))
+                    : "";
+                return "电量 " + soc + " · " + ac + chg + real;
             }
             catch (Exception ex) { return "电量: 读不到（" + ex.Message + "）"; }
         }
 
-        /// <summary>限值到底有没有被执行：电量已经过线却还在充 = 固件可能没认这个限值。</summary>
+        /// <summary>限值到底有没有被执行：只有在「真有充电电流」的时候，行为才有意义。
+        /// Windows 报的 charging 标志是平滑过的，插电恒为真，不能当证据。</summary>
         static string ChargeVerdict(int stop)
         {
             if (stop <= 0) return "判定: 未设置限值（不限制充电）。";
@@ -2555,16 +2622,29 @@ namespace LecooFanGui
                 SYSTEM_POWER_STATUS st;
                 if (!GetSystemPowerStatus(out st)) return "判定: 读不到系统电源状态，判断不了。";
                 int soc = st.BatteryLifePercent <= 100 ? st.BatteryLifePercent : -1;
-                bool charging = (st.BatteryFlag & 0x08) != 0;
                 bool discharging = (st.BatteryFlag & 0x10) != 0;
-                if (soc > stop && charging)
-                    return "判定: 电量 " + soc + "% 已越过限值 " + stop + "%，系统仍报充电 —— 限值可能没被执行。"
-                        + "（注意：Windows 这个充电标志是平滑过的，本机充电器本身就在 ~95% 停充，"
-                        + "要确认得把电量放到限值以下再充一次）";
+                AcpiBattery ab = AcpiBattery.Get();
+                bool onAc = st.ACLineStatus == 1;
+                bool reallyCharging = ab.Ok && ab.ChargeRate > 0;
+
+                if (onAc && ab.Ok && ab.ChargeRate <= 0 && ab.DischargeRate <= 0)
+                    return "判定: 插着电，但真实电流 0 mW —— 充电器本身没在工作，"
+                        + "跟限值没关系（限值也验证不了）。先把充电器救活（拔插适配器 / 放电唤醒）。";
+
+                if (reallyCharging && soc > stop)
+                    return "判定: 真实充电 " + ab.ChargeRate + " mW，电量 " + soc + "% 已越过限值 "
+                        + stop + "% 还在充 —— 限值没被执行。";
+
+                if (reallyCharging)
+                    return "判定: 真实充电 " + ab.ChargeRate + " mW，电量 " + soc + "% 还在限值 "
+                        + stop + "% 以下，等涨上去看停不停。";
+
+                if (discharging) return "判定: 电池在放电，暂时不充。";
                 if (soc >= 0 && soc <= stop)
                     return "判定: 电量 " + soc + "% 还在限值 " + stop + "% 以下，等涨上去看停不停。";
-                if (discharging) return "判定: 电池在放电，暂时不充。";
-                return "判定: 状态正常。";
+                if (!ab.Ok)
+                    return "判定: 读不到 ACPI 电流，判断不了（Windows 的 charging 标志不可信）。";
+                return "判定: 当前没有充电电流，状态待观察。";
             }
             catch (Exception ex) { return "判定: " + ex.Message; }
         }

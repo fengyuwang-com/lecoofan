@@ -489,7 +489,7 @@ cd C:\Projects\lecoofan
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -codepage:65001 ^
   -target:winexe -out:LecooFanGUI.exe -win32manifest:lecoofan_gui.manifest ^
   -win32icon:assets\lecoofan.ico -resource:assets\lecoofan.ico,LecooFan.AppIcon.ico ^
-  -r:System.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll lecoofan_gui.cs lecoofan_ui.cs
+  -r:System.dll -r:System.Windows.Forms.dll -r:System.Drawing.dll -r:System.Management.dll lecoofan_gui.cs lecoofan_ui.cs
 
 # 开机启动桩（不能加清单：带了管理员清单每次登录都会弹 UAC）
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -codepage:65001 ^
