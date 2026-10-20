@@ -2488,8 +2488,8 @@ namespace LecooFanGui
                 {
                     if (rb[0] > 0 && battCharging && battSoc >= rb[0])
                     {
-                        lblBattHint.Text = "⚠ 已到限值仍在充电：固件可能不执行该限值。把电量放到 " +
-                            rb[0] + "% 以下再充一次验证。";
+                        lblBattHint.Text = "⚠ 已到限值仍在充电：限值可能没被执行。把电量放到 " +
+                            rb[0] + "% 以下再充一次验证（本机充电器本身就在 ~95% 停充，别被它骗了）。";
                         lblBattHint.ForeColor = Ui.Bad;
                     }
                     else if (rb[0] > 0 && battSoc >= 0 && battSoc < rb[0])
@@ -2546,7 +2546,7 @@ namespace LecooFanGui
             catch (Exception ex) { return "电量: 读不到（" + ex.Message + "）"; }
         }
 
-        /// <summary>限值到底有没有被执行：电量已经过线却还在充 = 固件没认这个限值。</summary>
+        /// <summary>限值到底有没有被执行：电量已经过线却还在充 = 固件可能没认这个限值。</summary>
         static string ChargeVerdict(int stop)
         {
             if (stop <= 0) return "判定: 未设置限值（不限制充电）。";
@@ -2558,7 +2558,9 @@ namespace LecooFanGui
                 bool charging = (st.BatteryFlag & 0x08) != 0;
                 bool discharging = (st.BatteryFlag & 0x10) != 0;
                 if (soc > stop && charging)
-                    return "判定: 电量 " + soc + "% 已经越过限值 " + stop + "% 却还在充电 —— 本机固件没有执行这个限值。";
+                    return "判定: 电量 " + soc + "% 已越过限值 " + stop + "%，系统仍报充电 —— 限值可能没被执行。"
+                        + "（注意：Windows 这个充电标志是平滑过的，本机充电器本身就在 ~95% 停充，"
+                        + "要确认得把电量放到限值以下再充一次）";
                 if (soc >= 0 && soc <= stop)
                     return "判定: 电量 " + soc + "% 还在限值 " + stop + "% 以下，等涨上去看停不停。";
                 if (discharging) return "判定: 电池在放电，暂时不充。";
