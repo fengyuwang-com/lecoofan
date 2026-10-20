@@ -3,7 +3,10 @@
 
 用法: python tools_ec_snap.py <outfile> [lo] [hi]
 """
-import ctypes, sys
+import ctypes, sys, os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ec_lock import ec_lock
 
 DLL = r"C:\Program Files\LecooControlCenter\inpoutx64.dll"
 PORT = 0x4E
@@ -32,9 +35,10 @@ if __name__ == "__main__":
     lo = int(sys.argv[2], 0) if len(sys.argv) > 2 else 0x0400
     hi = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x0500
     rows = []
-    for a in range(lo, hi + 1):
-        v = read_reg(a)
-        rows.append("0x%04X 0x%02X %3d" % (a, v, v))
+    with ec_lock():
+        for a in range(lo, hi + 1):
+            v = read_reg(a)
+            rows.append("0x%04X 0x%02X %3d" % (a, v, v))
     with open(outfile, "w", encoding="utf-8") as f:
         f.write("\n".join(rows) + "\n")
     print("wrote", outfile, len(rows), "bytes")

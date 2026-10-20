@@ -1,7 +1,10 @@
 """只读小工具：读 EC 0x04B0 附近的字节，看充电限值相关寄存器现在的真实状态。
 只做少量读，不写任何东西；跑之前确保没有别的进程在访问 EC。
 """
-import ctypes, sys
+import ctypes, sys, os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ec_lock import ec_lock
 
 DLL = r"C:\Program Files\LecooControlCenter\inpoutx64.dll"
 PORT = 0x4E
@@ -35,5 +38,7 @@ if __name__ == "__main__":
     lo = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0x04A0
     hi = int(sys.argv[2], 0) if len(sys.argv) > 2 else 0x04D0
     print("addr : value")
-    for a in range(lo, hi + 1):
-        print("0x%04X : 0x%02X  %3d" % (a, read_reg(a), read_reg(a)))
+    with ec_lock():
+        for a in range(lo, hi + 1):
+            v = read_reg(a)
+            print("0x%04X : 0x%02X  %3d" % (a, v, v))

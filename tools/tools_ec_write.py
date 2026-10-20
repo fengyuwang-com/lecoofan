@@ -3,7 +3,10 @@
 
 用法: python tools_ec_write.py <addr> <value>
 """
-import ctypes, sys
+import ctypes, sys, os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ec_lock import ec_lock
 
 DLL = r"C:\Program Files\LecooControlCenter\inpoutx64.dll"
 PORT = 0x4E
@@ -40,8 +43,9 @@ def write_reg(addr, val):
 if __name__ == "__main__":
     addr = int(sys.argv[1], 0)
     val = int(sys.argv[2], 0)
-    before = read_reg(addr)
-    write_reg(addr, val)
-    after = read_reg(addr)
+    with ec_lock():
+        before = read_reg(addr)
+        write_reg(addr, val)
+        after = read_reg(addr)
     print("0x%04X: 0x%02X -> wrote 0x%02X -> readback 0x%02X %s" %
           (addr, before, val & 0xFF, after, "OK" if after == (val & 0xFF) else "MISMATCH"))

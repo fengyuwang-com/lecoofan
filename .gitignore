@@ -36,3 +36,5 @@ assets/lecoofan-preview.png
 FENGMEM.md
 .zcode/
 .freebuff/
+__pycache__/
+*.pyc
