@@ -22,6 +22,9 @@ LecooFanTray.exe
 dist/
 *.7z
 
+# --charge-apply 输出（自动生成）
+charge_apply.log
+
 # 用户配置（本机测试用，不入库）
 lecoofan_gui.cfg
 

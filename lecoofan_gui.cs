@@ -286,30 +286,75 @@ namespace LecooFanGui
         void Enter() { int[] seq = { 0x87, 0x01, 0x55, 0x55 }; foreach (int b in seq) Out(PORT, b); }
         void Exit() { Out(PORT, 0x02); Out(PORT + 1, 0x02); }
 
+        // ── EC 事务锁 ────────────────────────────────────────────────────────
+        // EC 的 index/data 端口序列（Enter → 写地址 → 读写数据 → Exit）必须整段原子执行，
+        // 一旦被插队，EC 看到的地址和数据就是错的，可能写坏状态。
+        //   进程内：采样线程（250ms 一次）和 UI 定时器都在读写 EC，不加锁会互相插队。
+        //   跨进程：LecooFanGUI 常驻 + CLI（--charge 等）另起进程，也要排队；
+        //          厂商 lecoo-ec-daemon 不认这把锁，所以它运行时不要同时跑 CLI。
+        // 2026-10-20 那次意外断电（无 1074、无蓝屏、Kernel-Power 41）发生在多进程同时
+        // 抢 EC 的那几分钟 —— EC 是主板供电的总管，被写坏它会直接掐电源。所以这把锁是硬要求。
+        static readonly object EcSync = new object();
+        static readonly Mutex EcCross = NewEcMutex();
+
+        static Mutex NewEcMutex()
+        {
+            try { return new Mutex(false, @"Local\LecooFanEcAccess"); }
+            catch { return null; }
+        }
+
+        /// <summary>在锁内跑一次 EC 事务。拿不到跨进程锁就放弃本次操作（宁可少读一次，
+        /// 也不能在没有互斥的情况下写 EC —— 那正是把机器写挂的姿势）。</summary>
+        T EcCall<T>(Func<T> body)
+        {
+            bool held = false;
+            try
+            {
+                if (EcCross != null)
+                {
+                    try { held = EcCross.WaitOne(3000); }
+                    catch (AbandonedMutexException) { held = true; }   // 上一个持有者崩了，锁已自动释放
+                    if (!held) throw new TimeoutException("EC 正被其它进程占用，本次访问已跳过");
+                }
+                lock (EcSync) { return body(); }
+            }
+            finally
+            {
+                if (held) { try { EcCross.ReleaseMutex(); } catch { } }
+            }
+        }
+
         public int ReadReg(int addr)
         {
-            Enter();
-            Out(PORT, 0x2E); Out(PORT + 1, 0x11);
-            Out(PORT, 0x2F); Out(PORT + 1, (addr >> 8) & 0xFF);
-            Out(PORT, 0x2E); Out(PORT + 1, 0x10);
-            Out(PORT, 0x2F); Out(PORT + 1, addr & 0xFF);
-            Out(PORT, 0x2E); Out(PORT + 1, 0x12);
-            Out(PORT, 0x2F);
-            int v = In(PORT + 1);
-            Exit();
-            return v;
+            return EcCall<int>(delegate
+            {
+                Enter();
+                Out(PORT, 0x2E); Out(PORT + 1, 0x11);
+                Out(PORT, 0x2F); Out(PORT + 1, (addr >> 8) & 0xFF);
+                Out(PORT, 0x2E); Out(PORT + 1, 0x10);
+                Out(PORT, 0x2F); Out(PORT + 1, addr & 0xFF);
+                Out(PORT, 0x2E); Out(PORT + 1, 0x12);
+                Out(PORT, 0x2F);
+                int v = In(PORT + 1);
+                Exit();
+                return v;
+            });
         }
 
         public void WriteReg(int addr, int val)
         {
-            Enter();
-            Out(PORT, 0x2E); Out(PORT + 1, 0x11);
-            Out(PORT, 0x2F); Out(PORT + 1, (addr >> 8) & 0xFF);
-            Out(PORT, 0x2E); Out(PORT + 1, 0x10);
-            Out(PORT, 0x2F); Out(PORT + 1, addr & 0xFF);
-            Out(PORT, 0x2E); Out(PORT + 1, 0x12);
-            Out(PORT, 0x2F); Out(PORT + 1, val & 0xFF);
-            Exit();
+            EcCall<int>(delegate
+            {
+                Enter();
+                Out(PORT, 0x2E); Out(PORT + 1, 0x11);
+                Out(PORT, 0x2F); Out(PORT + 1, (addr >> 8) & 0xFF);
+                Out(PORT, 0x2E); Out(PORT + 1, 0x10);
+                Out(PORT, 0x2F); Out(PORT + 1, addr & 0xFF);
+                Out(PORT, 0x2E); Out(PORT + 1, 0x12);
+                Out(PORT, 0x2F); Out(PORT + 1, val & 0xFF);
+                Exit();
+                return 0;
+            });
         }
 
         public int ReadRam(int offset) { return ReadReg(0x0400 + offset); }
@@ -318,6 +363,41 @@ namespace LecooFanGui
         public int FanPwm() { return ReadReg(0x1809); }
         public void SetFanPwm(int pwm) { WriteReg(0x1809, pwm & 0xFF); }
         public void ReleaseFan() { WriteReg(0x1809, 0x00); }   // EC resumes auto control
+
+        // ── 电池充电限值（EC FlexiCharger 兼容）────────────────────────────
+        // 反向出来的三个寄存器（N175L / IT5570 实测，与联想官方软件同一套）：
+        //   0x04B0 bit4 = 限值使能    0x04BB = 停充阈值(%)    0x04BC = 复充阈值(%)
+        // 证据：厂商 lecoo-ctrl.exe charge 设成 60% 之后，这三个字节正好是 0x10 / 0x3C / 0x37；
+        // 自己直接写这三个字节，厂商 CLI 再回读也是「55% 开始充 / 60% 停充」，两边完全等价。
+        // 语义是滞回：电量掉到「复充阈值」以下才继续充，充到「停充阈值」就停。
+        public const int REG_CHG_FLAG = 0x04B0, REG_CHG_STOP = 0x04BB, REG_CHG_RESUME = 0x04BC;
+        public const int CHG_FLAG_BIT = 0x10;
+
+        /// <summary>写充电限值。stop&lt;=0 表示「不限制」（与厂商 full 档一致：阈值清零）。</summary>
+        public void SetChargeLimit(int stop, int resume)
+        {
+            // 先写阈值再置使能位：使能位一动 EC 就开始按新阈值办事，别让它看到半截值。
+            if (stop <= 0)
+            {
+                WriteReg(REG_CHG_STOP, 0);
+                WriteReg(REG_CHG_RESUME, 0);
+            }
+            else
+            {
+                WriteReg(REG_CHG_STOP, stop & 0xFF);
+                WriteReg(REG_CHG_RESUME, resume & 0xFF);
+            }
+            // 使能位只在没置位时才写：0x04B0 是位域，别把别的位抹掉，也别反复戳同一个寄存器
+            // （反复写 EC 寄存器是 2026-10-20 那次意外断电的嫌疑之一，宁可少写）。
+            int flag = ReadReg(REG_CHG_FLAG);
+            if ((flag & CHG_FLAG_BIT) == 0) WriteReg(REG_CHG_FLAG, flag | CHG_FLAG_BIT);
+        }
+
+        /// <summary>读回充电限值：{停充%, 复充%}。两个都是 0 = 不限制。</summary>
+        public int[] ChargeLimit()
+        {
+            return new int[] { ReadReg(REG_CHG_STOP), ReadReg(REG_CHG_RESUME) };
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -621,6 +701,14 @@ namespace LecooFanGui
             new CpuMode("deep",  "极静(实验)", 0, 80, 90, 0, 0, 0, "关 HWP · 锁 1600 RPM\n实验档，仅调试用", FanPreset.Silent, 1600),
         };
 
+        // 电池充电限值预设：停充阈值 / 复充阈值（滞回）。
+        // 60/55、80/70、95/90、50/40 四组是联想官方 FlexiCharger 自己用的组合，
+        // 这里沿用同一套阈值，本机固件才认；40/35 是按同样规则补的一档。
+        static readonly string[] ChargeNames = { "不限制 (100%)", "40%", "50%", "60%", "80%", "95%" };
+        static readonly int[] ChargeStops = { 0, 40, 50, 60, 80, 95 };
+        static readonly int[] ChargeResumes = { 0, 35, 40, 55, 70, 90 };
+        const string BattHintText = "写 EC 0x04BB/0x04BC，与联想 FlexiCharger 同一套寄存器。限值存在 EC RAM 里，断电即失效，重新开机自动恢复。";
+
         static readonly string LogFile = System.IO.Path.Combine(Application.StartupPath, "lecoofan_gui.log");
         static readonly string CfgFile = System.IO.Path.Combine(Application.StartupPath, "lecoofan_gui.cfg");
 
@@ -657,7 +745,7 @@ namespace LecooFanGui
         static void ScaleTree(Form form, float s, float fontScale)
         {
             foreach (Control c in form.Controls) ScaleOne(c, s, fontScale);
-            form.ClientSize = new Size(S(860), S(760));   // 与 BuildUi 里的 860x760 保持一致
+            form.ClientSize = new Size(S(860), S(880));   // 与 BuildUi 里的 860x880 保持一致
         }
 
         static void ScaleOne(Control c, float s, float fontScale)
@@ -694,8 +782,17 @@ namespace LecooFanGui
         TextBox txtLog;
         Button btnStress, btnSoak, btnFactory;
         // 可缩放窗口：LayoutUi 要重排的控件都留引用（设计坐标仍写在 BuildUi 里，LayoutUi 按比例重算）
-        Card cardMode, cardFan, cardTune, cardMon, cardAct, cardSys;
+        Card cardMode, cardFan, cardTune, cardMon, cardAct, cardSys, cardBatt;
         Label lblEpp, lblCool, lblPwm, lblFanHint, lblSoakHint;
+        Label lblBattCap, lblBattState, lblBattHint;
+        ComboBox cmbBatt;
+        bool battUiReady;                           // 组合框还在装选项时不触发写入
+        int chargeLimitStop = -1;                   // -1 = 没配过（绝不碰 EC）；0 = 不限制；>0 = 停充阈值
+        bool chargeLimitPending;                   // 配置里有值但 EC 还没连上，连上就补写
+        int battSoc = -1;                           // 电量百分比（GetSystemPowerStatus 读）
+        bool battCharging = false;                  // 系统认为正在充电（BatteryFlag bit7）
+        bool battOnAc = false;                      // 交流电在位（ACLineStatus）
+        int chargeFixTicks;                         // 限值被改后补写的节流计数
         Button btnApply, btnHelp, btnDir, btnExit;
         readonly List<Label> metricCaps = new List<Label>();
         readonly List<Label> metricVals = new List<Label>();
@@ -857,7 +954,7 @@ namespace LecooFanGui
                     if (s.WorkingArea.IntersectsWith(title)) { ok = true; break; }
             }
             if (ok) return;
-            Size sz = designSize.Width >= 320 ? designSize : new Size(860, 760);
+            Size sz = designSize.Width >= 320 ? designSize : new Size(860, 880);
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
             Size = sz;
             Location = new Point(wa.Left + Math.Max(0, (wa.Width - sz.Width) / 2),
@@ -1042,6 +1139,11 @@ namespace LecooFanGui
                 sb.AppendLine("epp=" + trkEpp.Value);
                 sb.AppendLine("turbo=" + (chkTurbo.Checked ? 1 : 0));
                 sb.AppendLine("cool=" + (cmbCool.SelectedIndex == 0 ? 1 : 0));
+                // 充电限值：-1 = 没配过（别去动 EC）；0 = 不限制；>0 = 停充阈值
+                // 启动早期（还没读到配置）也会走 SaveSettings，那时 chargeLimitStop 还是 -1；
+                // 直接写 -1 会把上次配好的限值抹掉，开机补写任务就再也认不出来 —— 保留旧值。
+                int charge = chargeLimitStop >= 0 ? chargeLimitStop : ReadCfgCharge();
+                sb.AppendLine("charge=" + charge);
                 // 窗口大小也记住（托盘/最小化时用还原尺寸，不然下次开机会照搬那个尺寸）。
                 // 但「没动过窗口」不写：默认大小是跟屏幕算出来的，写死了换屏幕/换缩放就不自适应了
                 // （这条踩过一次：自检留下的 win= 让新默认尺寸失效，一打开就带滚动条）。
@@ -1052,10 +1154,10 @@ namespace LecooFanGui
                 System.IO.File.WriteAllText(CfgFile, sb.ToString(), Encoding.UTF8);
                 // 配置只在用户动作时写（不是每个心跳），所以顺手记一行：排查「改了没生效」时
                 // 一眼能看出到底是没写进去，还是写了没读回来
-                Log(string.Format("配置已保存: cpu={0} fan={1} cap={2} pwm=0x{3:X2} epp={4} turbo={5} cool={6}{7}",
+                Log(string.Format("配置已保存: cpu={0} fan={1} cap={2} pwm=0x{3:X2} epp={4} turbo={5} cool={6} charge={7}{8}",
                     cur != null ? cur.Key : "keep", fan, sampler != null ? sampler.SilentRpmCap : 2000,
                     sampler != null ? sampler.ManualPwm : 0x30, trkEpp.Value,
-                    chkTurbo.Checked ? 1 : 0, cmbCool.SelectedIndex == 0 ? 1 : 0,
+                    chkTurbo.Checked ? 1 : 0, cmbCool.SelectedIndex == 0 ? 1 : 0, charge,
                     sb.ToString().Contains("win=") ? " win=" + ws.Width + "x" + ws.Height : ""));
             }
             catch { }
@@ -1066,7 +1168,7 @@ namespace LecooFanGui
             try
             {
                 if (!System.IO.File.Exists(CfgFile)) return;
-                string cpu = null, fan = null, cap = null, pwm = null, epp = null, turbo = null, cool = null, win = null, max = null;
+                string cpu = null, fan = null, cap = null, pwm = null, epp = null, turbo = null, cool = null, win = null, max = null, charge = null;
                 foreach (string line in System.IO.File.ReadAllLines(CfgFile, Encoding.UTF8))
                 {
                     string[] kv = line.Split('=');
@@ -1081,6 +1183,7 @@ namespace LecooFanGui
                     else if (k == "cool") cool = v;
                     else if (k == "win") win = v;
                     else if (k == "max") max = v;
+                    else if (k == "charge") charge = v;
                 }
                 int n;
 
@@ -1128,6 +1231,15 @@ namespace LecooFanGui
                     radFanManual.Checked = true;
                 }
                 else if (fan == "auto") radFanAuto.Checked = true;
+
+                // 电池充电限值：配置里有就写回 EC（EC RAM 断电即失，重启必须补写）；没有就完全不碰
+                if (charge != null && int.TryParse(charge, out n) && n >= 0)
+                {
+                    chargeLimitStop = n;
+                    SyncChargeCombo();
+                    if (!cliMode) WriteChargeLimit(n);
+                    else chargeLimitPending = false;
+                }
 
                 Log(string.Format("已恢复上次配置: cpu={0} fan={1}{2}", cpu ?? "keep", fan ?? "auto",
                     fan == "silent" ? " cap=" + RpmCapValue() + " RPM" : ""));
@@ -1209,7 +1321,7 @@ namespace LecooFanGui
         void BuildUi()
         {
             Text = "LecooFan 控制台 — N175L CPU / 风扇调速";
-            ClientSize = new Size(860, 760);          // 设计尺寸：LayoutUi 以它为基准等比重算
+            ClientSize = new Size(860, 880);          // 设计尺寸：LayoutUi 以它为基准等比重算
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
             AutoScaleMode = AutoScaleMode.None;   // 缩放全部由 ScaleTree 手动做，关掉 WinForms 内置的那套
@@ -1294,6 +1406,38 @@ namespace LecooFanGui
             lblTuneHint.Font = Ui.FontSmall;
             lblTuneHint.Text = "EPP 越小越偏性能、越大越省电。本机的最大频率/最大状态键被固件忽略（实测无效）。";
             cardTune.Controls.Add(lblTuneHint);
+
+            // ── 电池充电限值（写 EC 0x04BB/0x04BC，和联想 FlexiCharger 同一套寄存器）──
+            cardBatt = new Card();
+            cardBatt.Text = "电池充电限值";
+            cardBatt.SetBounds(16, 632, 408, 112);
+            Controls.Add(cardBatt);
+
+            lblBattCap = new Label(); lblBattCap.Text = "充电上限"; lblBattCap.SetBounds(14, 30, 60, 16);
+            lblBattCap.ForeColor = Ui.Muted; lblBattCap.Font = Ui.FontSmall;
+            cardBatt.Controls.Add(lblBattCap);
+
+            cmbBatt = new ComboBox();
+            cmbBatt.DropDownStyle = ComboBoxStyle.DropDownList;
+            for (int i = 0; i < ChargeNames.Length; i++) cmbBatt.Items.Add(ChargeNames[i]);
+            cmbBatt.SelectedIndex = 0;
+            cmbBatt.SetBounds(78, 26, 150, 24);
+            cmbBatt.SelectedIndexChanged += delegate { ApplyChargeLimit(); };
+            cardBatt.Controls.Add(cmbBatt);
+
+            lblBattState = new Label();
+            lblBattState.SetBounds(14, 56, 380, 18);
+            lblBattState.ForeColor = Ui.Text;
+            lblBattState.AutoEllipsis = true;
+            lblBattState.Text = "当前: —";
+            cardBatt.Controls.Add(lblBattState);
+
+            lblBattHint = new Label();
+            lblBattHint.SetBounds(14, 78, 380, 30);
+            lblBattHint.ForeColor = Ui.Muted;
+            lblBattHint.Font = Ui.FontSmall;
+            lblBattHint.Text = BattHintText;
+            cardBatt.Controls.Add(lblBattHint);
 
             // ── 风扇 ──
             cardFan = new Card();
@@ -1513,20 +1657,20 @@ namespace LecooFanGui
         // 缩小：每张卡有自己的内容下限，先保底再把余量按比例分；缩到布局下限为止，再小交给窗体滚动条
         // —— 任何尺寸都不裁切、不重叠，放不下的小字提示直接隐藏（不硬塞、不切字）。
 
-        const int DESIGN_W = 860, DESIGN_H = 760;
+        const int DESIGN_W = 860, DESIGN_H = 880;
         // 设计高度（左列 mode/fan/tune 与右列 mon/act）：
         //   风扇卡从 172 提到 184 —— 原生 TrackBar 有最小高度（175% 下 80px ≈ 46 设计单位，
         //   比设计写的 38 大），172 会让 PWM 滑块压住底部提示条；
         //   模式卡 200→208 —— 2x2 模式格的说明是两行，格子高到 67 设计单位才放得下，
         //   差值从微调卡匀出来（168→160，它的下限只有 145），三张卡合计仍是 552，窗口设计尺寸不变。
-        const int DESIGN_MODE_H = 208, DESIGN_FAN_H = 184, DESIGN_TUNE_H = 160;
+        const int DESIGN_MODE_H = 208, DESIGN_FAN_H = 184, DESIGN_TUNE_H = 160, DESIGN_BATT_H = 112;
         const int DESIGN_MON_H = 300, DESIGN_ACT_H = 252;
         // 布局下限（设计单位）：再小就滚动，不再压缩内容。667 是左列三卡下限 + 缝 + 底部两卡的合计
         // （130+184+145+16 缝 +56 标题 +8 +64 回读 +10 +48 日志 +6 = 667），
         // 700 留 33 设计单位余量 —— 那点余量正好让模式格在默认窗口下也放得下两行说明。
-        const int FLOOR_W = 750, FLOOR_H = 700;
+        const int FLOOR_W = 750, FLOOR_H = 820;
         // 各卡内容下限（设计单位）：低于这个高度内容就得重叠，所以由 FlexHeights 保底
-        const int MIN_MODE_H = 130, MIN_FAN_H = 184, MIN_TUNE_H = 145;
+        const int MIN_MODE_H = 130, MIN_FAN_H = 184, MIN_TUNE_H = 145, MIN_BATT_H = 96;
         const int MIN_MON_H = 200, MIN_ACT_H = 200;    // 操作卡 200：三排按钮 156 + 底部结果行 38 不打架
 
         void LayoutUi()
@@ -1551,21 +1695,22 @@ namespace LecooFanGui
             int sysY = logY - S(10) - S(64);
 
             // 两列的高度预算（设计：左列底 624 / 右列底 616，各自离回读卡 8 / 16）
-            int lSpace = (sysY - S(8)) - topY - gap * 2;    // 三张卡 + 两道缝
+            int lSpace = (sysY - S(8)) - topY - gap * 3;    // 四张卡 + 三道缝
             int rSpace = (sysY - S(16)) - topY - gap;       // 两张卡 + 一道缝
 
             int[] lh = FlexHeights(lSpace,
-                new int[] { S(DESIGN_MODE_H), S(DESIGN_FAN_H), S(DESIGN_TUNE_H) },
-                new int[] { S(MIN_MODE_H), S(MIN_FAN_H) + fanDy, S(MIN_TUNE_H) });
+                new int[] { S(DESIGN_MODE_H), S(DESIGN_FAN_H), S(DESIGN_TUNE_H), S(DESIGN_BATT_H) },
+                new int[] { S(MIN_MODE_H), S(MIN_FAN_H) + fanDy, S(MIN_TUNE_H), S(MIN_BATT_H) });
             int[] rh = FlexHeights(rSpace,
                 new int[] { S(DESIGN_MON_H), S(DESIGN_ACT_H) },
                 new int[] { S(MIN_MON_H), S(MIN_ACT_H) });
-            int modeH = lh[0], fanH = lh[1], tuneH = lh[2], monH = rh[0], actH = rh[1];
+            int modeH = lh[0], fanH = lh[1], tuneH = lh[2], battH = lh[3], monH = rh[0], actH = rh[1];
 
             int y = topY;
             cardMode.SetBounds(margin, y, leftW, modeH); y = cardMode.Bottom + gap;
             cardFan.SetBounds(margin, y, leftW, fanH);   y = cardFan.Bottom + gap;
-            cardTune.SetBounds(margin, y, leftW, tuneH);
+            cardTune.SetBounds(margin, y, leftW, tuneH); y = cardTune.Bottom + gap;
+            cardBatt.SetBounds(margin, y, leftW, battH);
             y = topY;
             cardMon.SetBounds(rightX, y, rightW, monH);  y = cardMon.Bottom + gap;
             cardAct.SetBounds(rightX, y, rightW, actH);
@@ -1576,6 +1721,7 @@ namespace LecooFanGui
             LayoutModeCard();
             LayoutFanCard(fanDy);
             LayoutTuneCard();
+            LayoutBattCard();
             LayoutMonCard();
             LayoutActCard();
             valSys.SetBounds(S(14), S(26), cardSys.ClientSize.Width - S(28), S(34));
@@ -1721,6 +1867,20 @@ namespace LecooFanGui
             bool showHint = HintFits(lblTuneHint, hintW, hintH);
             lblTuneHint.Visible = showHint;
             if (showHint) lblTuneHint.SetBounds(S(174), S(110), hintW, hintH);
+        }
+
+        /// <summary>电池卡：上限下拉 + 状态回读 + 说明（说明放不下就整条隐藏，宁可少一句也不切字）。</summary>
+        void LayoutBattCard()
+        {
+            int cw = cardBatt.ClientSize.Width, ch = cardBatt.ClientSize.Height;
+            lblBattCap.SetBounds(S(14), S(30), S(60), S(16));
+            cmbBatt.SetBounds(S(78), S(26), S(150), S(24));
+            lblBattState.SetBounds(S(14), S(56), cw - S(28), S(18));
+            int hintY = S(78);
+            int hintH = ch - hintY - S(6);
+            bool showHint = HintFits(lblBattHint, cw - S(28), hintH);
+            lblBattHint.Visible = showHint;
+            if (showHint) lblBattHint.SetBounds(S(14), hintY, cw - S(28), hintH);
         }
 
         /// <summary>实时监控卡：读数两栏平分宽度，趋势图吃掉全部纵向余量（太矮就藏趋势图和脚注）。</summary>
@@ -2194,6 +2354,7 @@ namespace LecooFanGui
                 {
                     Log("EC 已连接（冷启动重试成功，温度/风扇控制恢复工作）");
                     sampler.LastError = "";
+                    if (chargeLimitStop >= 0) WriteChargeLimit(chargeLimitStop);   // 补写充电限值
                 }
             }
             if (!firstSampleLogged && sampler.Temp >= 0)
@@ -2216,9 +2377,213 @@ namespace LecooFanGui
             lblFreqNote.Text = sampler.FreqNote.Length > 0 ? sampler.FreqNote : "";
             if (sampler.LastError.Length > 0) { Log("错误: " + sampler.LastError); sampler.LastError = ""; }
             if (++uiTicks % HeartbeatTicks == 0) LogHeartbeat();
+            if (uiTicks % 10 == 0)                 // 每 5 秒刷一次电量 + 限值回读
+            {
+                UpdateBatterySoc();
+                RefreshBattState();
+            }
             RefreshSettingsLine();
             RefreshFanState();
             UpdateTrayIcon();
+        }
+
+        // ── 电池充电限值 ─────────────────────────────────────────────────
+        /// <summary>停充阈值 → 复充阈值（滞回）。预设表里有就用预设的，没有就按 stop-5 推。</summary>
+        static int ResumeFor(int stop)
+        {
+            if (stop <= 0) return 0;
+            for (int i = 0; i < ChargeStops.Length; i++) if (ChargeStops[i] == stop) return ChargeResumes[i];
+            return Math.Max(0, stop - 5);
+        }
+
+        int ChargeIndexFor(int stop)
+        {
+            for (int i = 0; i < ChargeStops.Length; i++) if (ChargeStops[i] == stop) return i;
+            return -1;
+        }
+
+        /// <summary>把下拉框同步到当前限值（装选项时不触发写入）。</summary>
+        void SyncChargeCombo()
+        {
+            if (cmbBatt == null) return;
+            battUiReady = false;
+            try
+            {
+                int idx = ChargeIndexFor(chargeLimitStop);
+                if (idx < 0 && chargeLimitStop > 0)
+                {
+                    for (int i = cmbBatt.Items.Count - 1; i >= 0; i--)
+                        if (cmbBatt.Items[i].ToString().StartsWith("自定义")) cmbBatt.Items.RemoveAt(i);
+                    cmbBatt.Items.Add("自定义 (" + chargeLimitStop + "%)");
+                    idx = cmbBatt.Items.Count - 1;
+                }
+                cmbBatt.SelectedIndex = idx < 0 ? 0 : idx;
+            }
+            finally { battUiReady = true; }
+        }
+
+        /// <summary>真正写 EC：stop&lt;=0 表示不限制。写完立刻回读确认。</summary>
+        void WriteChargeLimit(int stop)
+        {
+            if (!ec.Available) { chargeLimitPending = true; return; }
+            int resume = ResumeFor(stop);
+            try
+            {
+                ec.SetChargeLimit(stop, resume);
+                chargeLimitPending = false;
+                int[] rb = ec.ChargeLimit();
+                Log(string.Format("充电限值: 停充 {0}% / 复充 {1}%（EC 回读 {2}/{3}）",
+                    stop, resume, rb[0], rb[1]));
+            }
+            catch (Exception ex) { Log("写充电限值失败: " + ex.Message); }
+        }
+
+        /// <summary>下拉框变了 → 立刻生效（和风扇/电源那几档一样，改了就生效）。</summary>
+        void ApplyChargeLimit()
+        {
+            if (!battUiReady || cliMode || cmbBatt == null) return;
+            int idx = cmbBatt.SelectedIndex;
+            if (idx < 0 || idx >= ChargeStops.Length) return;
+            chargeLimitStop = ChargeStops[idx];
+            WriteChargeLimit(chargeLimitStop);
+            SaveSettings();
+            RefreshBattState();
+        }
+
+        /// <summary>联想官方 EC 守护进程在跑的话，它会按自己的状态文件改限值，得提醒一句。</summary>
+        static bool VendorDaemonRunning()
+        {
+            try { return Process.GetProcessesByName("lecoo-ec-daemon").Length > 0; }
+            catch { return false; }
+        }
+
+        /// <summary>回读 EC 里的限值并显示；配置值和 EC 对不上时补写回去（每 30 秒最多一次）。</summary>
+        void RefreshBattState()
+        {
+            if (lblBattState == null) return;
+            if (!ec.Available)
+            {
+                lblBattState.Text = "EC 未连接 —— 限值暂时写不进去";
+                lblBattState.ForeColor = Ui.Bad;
+                return;
+            }
+            try
+            {
+                int[] rb = ec.ChargeLimit();
+                string soc = battSoc >= 0 ? battSoc + "%" : "—";
+                string extra = VendorDaemonRunning() ? "  ⚠ 联想官方 EC 守护进程在跑，可能覆盖限值" : "";
+                if (rb[0] <= 0)
+                {
+                    lblBattState.Text = "当前: 不限制（充到 100%）· 电量 " + soc + extra;
+                    lblBattState.ForeColor = Ui.Muted;
+                }
+                else
+                {
+                    lblBattState.Text = string.Format("当前: 停充 {0}% · 复充 {1}% · 电量 {2}{3}",
+                        rb[0], rb[1], soc, extra);
+                    lblBattState.ForeColor = Ui.Good;
+                }
+                // 限值写了固件到底执不执行，只能看行为：电量已经过线还在充 = 没执行。
+                if (lblBattHint != null)
+                {
+                    if (rb[0] > 0 && battCharging && battSoc >= rb[0])
+                    {
+                        lblBattHint.Text = "⚠ 已到限值仍在充电：固件可能不执行该限值。把电量放到 " +
+                            rb[0] + "% 以下再充一次验证。";
+                        lblBattHint.ForeColor = Ui.Bad;
+                    }
+                    else if (rb[0] > 0 && battSoc >= 0 && battSoc < rb[0])
+                    {
+                        lblBattHint.Text = "限值已写入 EC，等电量涨到 " + rb[0] + "% 时看是否停充。";
+                        lblBattHint.ForeColor = Ui.Muted;
+                    }
+                    else
+                    {
+                        lblBattHint.Text = BattHintText;
+                        lblBattHint.ForeColor = Ui.Muted;
+                    }
+                }
+                if (chargeLimitStop >= 0 && !chargeLimitPending && !VendorDaemonRunning())
+                {
+                    int wantResume = ResumeFor(chargeLimitStop);
+                    if ((rb[0] != chargeLimitStop || rb[1] != wantResume) && ++chargeFixTicks >= 6)
+                    {
+                        chargeFixTicks = 0;
+                        Log(string.Format("EC 限值与配置不符（{0}/{1} vs {2}/{3}），已补写",
+                            rb[0], rb[1], chargeLimitStop, wantResume));
+                        WriteChargeLimit(chargeLimitStop);
+                    }
+                }
+            }
+            catch (Exception ex) { lblBattState.Text = "读取限值失败: " + ex.Message; }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct SYSTEM_POWER_STATUS
+        {
+            public byte ACLineStatus;
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag;
+            public int BatteryLifeTime;
+            public int BatteryFullLifeTime;
+        }
+        [DllImport("kernel32.dll")] static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS s);
+
+        /// <summary>电量和充电状态的文字描述（CLI 用来判断限值有没有真被执行）。</summary>
+        static string PowerStateText()
+        {
+            try
+            {
+                SYSTEM_POWER_STATUS st;
+                if (!GetSystemPowerStatus(out st)) return "电量: 读不到";
+                string soc = st.BatteryLifePercent <= 100 ? st.BatteryLifePercent + "%" : "—";
+                string ac = st.ACLineStatus == 1 ? "交流电在位" : "电池供电";
+                string chg = (st.BatteryFlag & 0x08) != 0 ? "，正在充电" :
+                             ((st.BatteryFlag & 0x10) != 0 ? "，正在放电" : "，未充未放");
+                return "电量 " + soc + " · " + ac + chg;
+            }
+            catch (Exception ex) { return "电量: 读不到（" + ex.Message + "）"; }
+        }
+
+        /// <summary>限值到底有没有被执行：电量已经过线却还在充 = 固件没认这个限值。</summary>
+        static string ChargeVerdict(int stop)
+        {
+            if (stop <= 0) return "判定: 未设置限值（不限制充电）。";
+            try
+            {
+                SYSTEM_POWER_STATUS st;
+                if (!GetSystemPowerStatus(out st)) return "判定: 读不到系统电源状态，判断不了。";
+                int soc = st.BatteryLifePercent <= 100 ? st.BatteryLifePercent : -1;
+                bool charging = (st.BatteryFlag & 0x08) != 0;
+                bool discharging = (st.BatteryFlag & 0x10) != 0;
+                if (soc > stop && charging)
+                    return "判定: 电量 " + soc + "% 已经越过限值 " + stop + "% 却还在充电 —— 本机固件没有执行这个限值。";
+                if (soc >= 0 && soc <= stop)
+                    return "判定: 电量 " + soc + "% 还在限值 " + stop + "% 以下，等涨上去看停不停。";
+                if (discharging) return "判定: 电池在放电，暂时不充。";
+                return "判定: 状态正常。";
+            }
+            catch (Exception ex) { return "判定: " + ex.Message; }
+        }
+
+        /// <summary>电量百分比（系统 API，比 WMI 快得多，UI 心跳里用不卡）。</summary>
+        void UpdateBatterySoc()
+        {
+            try
+            {
+                SYSTEM_POWER_STATUS st;
+                if (GetSystemPowerStatus(out st))
+                {
+                    if (st.BatteryLifePercent <= 100) battSoc = st.BatteryLifePercent;
+                    else battSoc = -1;
+                    // BatteryFlag: 0x08 = 充电中, 0x10 = 放电中, 0x80 = 没有电池
+                    battCharging = (st.BatteryFlag & 0x08) != 0;
+                    battOnAc = st.ACLineStatus == 1;
+                }
+                else battSoc = -1;
+            }
+            catch { battSoc = -1; }
         }
 
         void RefreshFanState()
@@ -2647,6 +3012,7 @@ namespace LecooFanGui
                     //      「任务管理器 → 启动应用」列表里，Run 键才会；桩只负责触发那个计划任务，
                     //      自己不提权、不弹 UAC。真正干活的始终是计划任务。
                     const string taskName = "LecooFan";
+                    const string chargeTaskName = "LecooFanCharge";
                     const string runKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
                     const string runName = "LecooFan";
                     // PowerShell 单引号字符串：路径里的单引号要翻倍转义（见 PsQ）
@@ -2680,10 +3046,32 @@ namespace LecooFanGui
                     {
                         sb.AppendLine("未找到 " + System.IO.Path.GetFileName(stub) + "，跳过启动项（计划任务已装好；用 README 里的编译命令补上启动桩后可以再跑一次本命令）。");
                     }
+
+                    // ② 充电限值的开机任务：EC RAM 断电即失，重启后限值必须重新写一遍。
+                    // 单独一个任务，不依赖 GUI 在不在：登录时按配置里的 charge= 写回 EC
+                    // （配置里没配就什么都不做，绝不乱写 EC）。
+                    // 和上面的 LecooFan 任务同时跑不要紧 —— 两个进程写的是同一组寄存器，
+                    // 而且现在有跨进程 EC 锁（Local\LecooFanEcAccess）排队，不会互相插队。
+                    string appDir = System.IO.Path.GetDirectoryName(typeof(MainForm).Assembly.Location);
+                    string ps2 =
+                        "$a = New-ScheduledTaskAction -Execute " + PsQ(typeof(MainForm).Assembly.Location) +
+                        " -Argument '--charge-apply /charge_apply.log' -WorkingDirectory " + PsQ(appDir) + ";" +
+                        "$t = New-ScheduledTaskTrigger -AtLogOn;" +
+                        "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew;" +
+                        "$p = New-ScheduledTaskPrincipal -UserId " + PsQ(Environment.UserDomainName + "\\" + Environment.UserName) + " -LogonType Interactive -RunLevel Highest;" +
+                        "Register-ScheduledTask -TaskName " + PsQ(chargeTaskName) +
+                        " -Action $a -Trigger $t -Settings $s -Principal $p" +
+                        " -Description 'LecooFan: re-apply battery charge limit after boot (EC RAM is volatile)' -Force | Out-Null";
+                    int rc3 = RunTool("powershell", "-NoProfile -NonInteractive -Command \"" + ps2 + "\"", out o);
+                    sb.Append(o);
+                    sb.AppendLine(rc3 == 0
+                        ? "已设置充电限值开机任务（" + chargeTaskName + "：登录时按配置补写 EC 0x04BB/0x04BC；没配限值就什么都不做）。"
+                        : "充电限值开机任务设置失败（不影响风扇控制和限值本身，只是重启后要手动补写一次）。");
                 }
                 else if (cmd == "--uninstall-autostart")
                 {
                     const string taskName = "LecooFan";
+                    const string chargeTaskName = "LecooFanCharge";
                     const string runKey = @"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
                     const string runName = "LecooFan";
                     string o;
@@ -2692,11 +3080,78 @@ namespace LecooFanGui
                     sb.AppendLine(rc == 0
                         ? "已删除开机自启动（计划任务 " + taskName + "）。"
                         : "删除失败（任务可能本来就不存在，或权限不足）。");
+                    int rc4 = RunTool("schtasks", "/Delete /TN \"" + chargeTaskName + "\" /F", out o);
+                    sb.Append(o);
+                    sb.AppendLine(rc4 == 0
+                        ? "已删除充电限值开机任务（" + chargeTaskName + "）。"
+                        : "删除充电限值任务失败（可能本来就不存在）。");
                     int rc2 = RunTool("reg", "delete \"" + runKey + "\" /v " + runName + " /f", out o);
                     sb.Append(o);
                     sb.AppendLine(rc2 == 0
                         ? "已删除启动项 " + runName + "（任务管理器 → 启动应用 里不再显示）。"
                         : "启动项删除失败（可能本来就不存在）。");
+                }
+                else if (cmd == "--charge" && args.Length >= 2)
+                {
+                    // --charge 60 | --charge off | --charge status
+                    Ec e = new Ec();
+                    sb.AppendLine("ec: " + e.Status);
+                    if (!e.Available)
+                    {
+                        sb.AppendLine("EC 不可用，放弃（不碰 EC）。用管理员身份运行，并确认 inpout 驱动已加载。");
+                    }
+                    else
+                    {
+                        string a = args[1].ToLowerInvariant();
+                    if (a == "status")
+                    {
+                        int[] rb0 = e.ChargeLimit();
+                        sb.AppendLine(string.Format("charge limit: stop={0}% resume={1}%", rb0[0], rb0[1]));
+                        sb.AppendLine("power: " + PowerStateText());
+                        sb.AppendLine(ChargeVerdict(rb0[0]));
+                    }
+                        else
+                        {
+                            int stop = 0, resume = 0;
+                            if (a == "off" || a == "0") { stop = 0; resume = 0; }
+                            else
+                            {
+                                int pct = int.Parse(a);
+                                int idx = -1;
+                                for (int i = 0; i < ChargeStops.Length; i++) if (ChargeStops[i] == pct) idx = i;
+                                if (idx >= 0) { stop = ChargeStops[idx]; resume = ChargeResumes[idx]; }
+                                else { stop = pct; resume = Math.Max(0, pct - 5); }
+                            }
+                        e.SetChargeLimit(stop, resume);
+                        int[] rb = e.ChargeLimit();
+                        sb.AppendLine(string.Format("charge limit set: stop={0}% resume={1}% (readback {2}/{3})",
+                            stop, resume, rb[0], rb[1]));
+                        sb.AppendLine("power: " + PowerStateText());
+                        SaveCfgCharge(stop);      // 同步配置：GUI 和开机任务都跟着走
+                        }
+                    }
+                }
+                else if (cmd == "--charge-apply")
+                {
+                    // 开机计划任务用：读配置里的限值写回 EC（EC RAM 断电即失）
+                    int stop = ReadCfgCharge();
+                    if (stop < 0) sb.AppendLine("charge: 配置里没有限值，跳过（不碰 EC）");
+                    else
+                    {
+                        Ec e = new Ec();
+                        if (!e.Available)
+                        {
+                            sb.AppendLine("charge: EC 不可用（" + e.Status + "），本次不写。开机任务会等下次登录再试。");
+                        }
+                        else
+                        {
+                            int resume = stop > 0 ? ResumeFor(stop) : 0;
+                            e.SetChargeLimit(stop, resume);
+                            int[] rb = e.ChargeLimit();
+                            sb.AppendLine(string.Format("charge applied: stop={0}% resume={1}% (readback {2}/{3})",
+                                stop, resume, rb[0], rb[1]));
+                        }
+                    }
                 }
                 else if (cmd == "--fan-off")
                 {
@@ -2713,6 +3168,8 @@ namespace LecooFanGui
                     sb.AppendLine("       LecooFanGUI.exe --ui-silent <rpm> [sec]   # 真窗体自检：点一下「静音上限」");
                     sb.AppendLine("       LecooFanGUI.exe --fan-curve <sec> | --soak <sec> [mode] [fan] | --dumpui [scale]");
                     sb.AppendLine("           其中 fan = auto | silent(默认锁 2000 RPM) | curve | manual");
+                    sb.AppendLine("       LecooFanGUI.exe --charge <60|off|status>   # 电池充电限值（写 EC 0x04BB/0x04BC）");
+                    sb.AppendLine("       LecooFanGUI.exe --charge-apply   # 按配置补写充电限值（开机计划任务用）");
                     sb.AppendLine("       LecooFanGUI.exe --tray     # 后台运行：进通知区托盘，不弹窗口（开机自启动同款）");
                     sb.AppendLine("       LecooFanGUI.exe --install-autostart | --uninstall-autostart   # 设置/取消开机自启动（需管理员）");
                     sb.AppendLine("           同时装两处：计划任务(干活,无声无UAC) + Run启动项 LecooFanTray.exe(任务管理器启动应用里可见)");
@@ -2725,6 +3182,43 @@ namespace LecooFanGui
                 ? outFile
                 : System.IO.Path.Combine(Application.StartupPath, "gui_cli_report.txt");
             try { System.IO.File.WriteAllText(path, sb.ToString(), Encoding.UTF8); } catch { }
+        }
+
+        /// <summary>读配置里的 charge= 值；没有这一行返回 -1（= 没配过）。</summary>
+        static int ReadCfgCharge()
+        {
+            try
+            {
+                if (!System.IO.File.Exists(CfgFile)) return -1;
+                foreach (string line in System.IO.File.ReadAllLines(CfgFile, Encoding.UTF8))
+                {
+                    string[] kv = line.Split('=');
+                    if (kv.Length == 2 && kv[0].Trim() == "charge")
+                    {
+                        int v;
+                        if (int.TryParse(kv[1].Trim(), out v)) return v;
+                    }
+                }
+            }
+            catch { }
+            return -1;
+        }
+
+        /// <summary>只改配置里的 charge= 这一行（CLI 用），其余行原样保留。</summary>
+        static void SaveCfgCharge(int stop)
+        {
+            try
+            {
+                List<string> lines = System.IO.File.Exists(CfgFile)
+                    ? new List<string>(System.IO.File.ReadAllLines(CfgFile, Encoding.UTF8))
+                    : new List<string>();
+                bool found = false;
+                for (int i = 0; i < lines.Count; i++)
+                    if (lines[i].Trim().StartsWith("charge=")) { lines[i] = "charge=" + stop; found = true; }
+                if (!found) lines.Add("charge=" + stop);
+                System.IO.File.WriteAllLines(CfgFile, lines.ToArray(), Encoding.UTF8);
+            }
+            catch { }
         }
 
         static Mutex oneInstance;
